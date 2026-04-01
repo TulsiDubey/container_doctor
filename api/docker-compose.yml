@@ -1,0 +1,12 @@
+api:
+  build: ./api
+  container_name: api
+  ports:
+    - "5000:5000"   # ✅ ADD THIS
+  environment:
+    - POSTGRES_USER=tulsi1
+    - POSTGRES_PASSWORD=Tulsi@2211
+    - POSTGRES_DB=mydb
+  depends_on:
+    - db
+  restart: unless-stopped

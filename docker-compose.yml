@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  container_doctor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: container_doctor
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - GEMINI_API_KEY=AIzaSyCwuSsPomoqGACzm8t4HH_BgFOdd3KoI0Y
+      - TARGET_CONTAINERS=web,api,db
+      - CHECK_INTERVAL=10
+      - LOG_LINES=50
+      - AUTO_FIX=true
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - MAX_DIAGNOSES_PER_HOUR=20
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  web:
+    image: nginx:latest
+    container_name: web
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    container_name: api
+    ports:
+      - "5000:5000"
+    environment:
+      - DATABASE_URL=postgres://\({POSTGRES_USER}:\){POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - POOL_SIZE=20
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  db:
+    image: postgres:15
+    container_name: db
+    environment:
+      - POSTGRES_USER=tulsi1
+      - POSTGRES_PASSWORD=Tulsi@2211
+      - POSTGRES_DB=mydb
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  db_data:
+
