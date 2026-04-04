@@ -9,4 +9,4 @@ api:
     - POSTGRES_DB=mydb
   depends_on:
     - db
-  restart: unless-stopped
+  restart: no

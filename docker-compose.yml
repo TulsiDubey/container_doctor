@@ -58,6 +58,14 @@ services:
       - db
     restart: unless-stopped
 
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflare_tunnel
+    command: tunnel --url http://container_doctor:8080
+    restart: always
+    depends_on:
+      - container_doctor
+
   db:
     image: postgres:15
     container_name: db
