@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Docker Agent Authentication</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --sidebar-bg: #1e293b;
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --accent-blue: #3b82f6;
+            --high-severity: #ef4444;
+        }
+
+        body { 
+            margin: 0; 
+            font-family: 'Inter', sans-serif; 
+            background: var(--bg-color); 
+            color: #f8fafc; 
+            display: flex; 
+            height: 100vh; 
+            justify-content: center; 
+            align-items: center; 
+            background: radial-gradient(circle at top left, #1e1b4b, #0f172a); 
+        }
+
+        .login-box {
+            background: rgba(30, 41, 59, 0.7); 
+            backdrop-filter: blur(12px); 
+            -webkit-backdrop-filter: blur(12px); 
+            border: 1px solid var(--glass-border); 
+            border-radius: 12px; 
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2); 
+            width: 100%;
+            max-width: 400px;
+            padding: 40px;
+            box-sizing: border-box;
+        }
+
+        h2 { margin-top: 0; font-weight: 700; text-align: center; margin-bottom: 5px; }
+        .subtitle { text-align: center; color: #94a3b8; font-size: 14px; margin-bottom: 30px; }
+
+        .input-group { margin-bottom: 20px; }
+        .input-group label { display: block; font-size: 13px; font-weight: 600; color: #cbd5e1; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;}
+        .input-group input { 
+            width: 100%; 
+            padding: 12px; 
+            border-radius: 8px; 
+            background: #020617; 
+            border: 1px solid #334155; 
+            color: white; 
+            font-family: inherit; 
+            font-size: 15px; 
+            box-sizing: border-box; 
+            transition: all 0.2s;
+        }
+        .input-group input:focus { outline: none; border-color: var(--accent-blue); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3); }
+
+        button { 
+            width: 100%; 
+            padding: 14px; 
+            border-radius: 8px; 
+            background: var(--accent-blue); 
+            color: white; 
+            border: none; 
+            font-family: inherit; 
+            font-weight: 600; 
+            font-size: 16px; 
+            cursor: pointer; 
+            transition: background 0.2s; 
+            margin-top: 10px;
+        }
+        button:hover { background: #2563eb; }
+        button:disabled { background: #475569; cursor: not-allowed; }
+
+        .error-msg {
+            background: rgba(239, 68, 68, 0.1);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            margin-bottom: 20px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="login-box">
+        <div style="text-align: center; margin-bottom: 20px;">
+            <h1 style="font-size: 32px; margin: 0; background: linear-gradient(90deg, #60a5fa, #c084fc); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent;">🐋 Docker Agent</h1>
+        </div>
+        <h2>Authentication Required</h2>
+        <div class="subtitle">Please verify your Docker Registry credentials to access your autonomous infrastructure.</div>
+
+        <div id="error-box" class="error-msg"></div>
+
+        <form id="loginForm">
+            <div class="input-group">
+                <label for="username">Docker Hub ID</label>
+                <input type="text" id="username" placeholder="Username" required>
+            </div>
+            <div class="input-group">
+                <label for="password">Access Token / Password</label>
+                <input type="password" id="password" placeholder="••••••••" required>
+            </div>
+            <button type="submit" id="submitBtn">Verify Identity</button>
+        </form>
+    </div>
+
+    <script>
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('submitBtn');
+            const errorBox = document.getElementById('error-box');
+            
+            btn.disabled = true;
+            btn.innerText = "Verifying with Registry...";
+            errorBox.style.display = "none";
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('username').value,
+                        password: document.getElementById('password').value
+                    })
+                });
+
+                const data = await res.json();
+                
+                if (data.success) {
+                    window.location.href = "/";
+                } else {
+                    errorBox.innerText = data.error || "Authentication failed.";
+                    errorBox.style.display = "block";
+                    btn.disabled = false;
+                    btn.innerText = "Verify Identity";
+                }
+            } catch (err) {
+                errorBox.innerText = "Network error communicating with the agent framework.";
+                errorBox.style.display = "block";
+                btn.disabled = false;
+                btn.innerText = "Verify Identity";
+            }
+        });
+    </script>
+</body>
+</html>

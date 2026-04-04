@@ -11,13 +11,22 @@ services:
     environment:
       - GEMINI_API_KEY=AIzaSyCwuSsPomoqGACzm8t4HH_BgFOdd3KoI0Y
       - TARGET_CONTAINERS=web,api,db
-      - CHECK_INTERVAL=10
+      - CHECK_INTERVAL=3
       - LOG_LINES=50
       - AUTO_FIX=true
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
       - MAX_DIAGNOSES_PER_HOUR=20
+      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
+      - SMTP_SERVER=${SMTP_SERVER:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_RECIPIENT=${SMTP_RECIPIENT:-}
     ports:
       - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -43,7 +52,7 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - DATABASE_URL=postgres://\({POSTGRES_USER}:\){POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
       - POOL_SIZE=20
     depends_on:
       - db
@@ -52,6 +61,8 @@ services:
   db:
     image: postgres:15
     container_name: db
+    ports:
+      - "5433:5432"
     environment:
       - POSTGRES_USER=tulsi1
       - POSTGRES_PASSWORD=Tulsi@2211
@@ -60,7 +71,7 @@ services:
       - db_data:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5

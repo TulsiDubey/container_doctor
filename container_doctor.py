@@ -4,10 +4,14 @@ import time
 import logging
 import os
 import requests
+import smtplib
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from email.message import EmailMessage
 from datetime import datetime, timedelta
 from collections import defaultdict
 from threading import Thread
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_file, request, session, redirect
 import google.generativeai as genai
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -28,26 +32,250 @@ LOG_LINES = int(os.getenv("LOG_LINES", "50"))
 AUTO_FIX = os.getenv("AUTO_FIX", "true").lower() == "true"
 SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL", "")
 MAX_DIAGNOSES = int(os.getenv("MAX_DIAGNOSES_PER_HOUR", "20"))
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_RECIPIENT = os.getenv("SMTP_RECIPIENT", "")
 
-# --- State tracking ---
-diagnosis_history = []
-fix_history = defaultdict(list)
+# --- State tracking (Rate limits only) ---
 last_error_seen = {}
 rate_limit_counter = defaultdict(int)
 rate_limit_reset = datetime.now() + timedelta(hours=1)
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "docker_agent_secure_default_key_991823")
+
+@app.before_request
+def require_login():
+    protected_paths = ["/", "/stats", "/pods", "/history"]
+    if request.path in protected_paths or request.path.startswith("/diagnostics") or request.path.startswith("/logs"):
+        if not session.get("authenticated"):
+            if request.path == "/":
+                return redirect("/login")
+            return jsonify({"error": "Unauthorized"}), 401
+
+@app.route("/login")
+def login_page():
+    return send_file("login.html")
+
+@app.route("/api/login", methods=["POST"])
+def perform_login():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+    try:
+        get_docker_client().login(username=username, password=password)
+        session["authenticated"] = True
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Docker Hub Login Failed: {str(e)}")
+        return jsonify({"success": False, "error": "Invalid Docker Registry Credentials"}), 401
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
+
+# --- Database ---
+db_queue = []
+
+def flush_db_queue():
+    global db_queue
+    if not db_queue:
+        return
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                to_remove = []
+                for q in list(db_queue):
+                    try:
+                        if q['type'] == 'event':
+                            cur.execute("INSERT INTO events (container, event, details, timestamp) VALUES (%s, %s, %s, %s)",
+                                        (q['container'], q['event'], json.dumps(q['details']), q['timestamp']))
+                        elif q['type'] == 'restart':
+                            cur.execute("""
+                                INSERT INTO container_state (container, restart_count, last_restart) 
+                                VALUES (%s, 1, %s)
+                                ON CONFLICT (container) DO UPDATE 
+                                SET restart_count = container_state.restart_count + 1,
+                                    last_restart = EXCLUDED.last_restart
+                            """, (q['container'], q['timestamp'], q['timestamp']))
+                        to_remove.append(q)
+                    except Exception as loop_e:
+                        logger.error(f"Failed to flush item: {loop_e}")
+                        to_remove.append(q)
+                
+                for r in to_remove:
+                    if r in db_queue:
+                        db_queue.remove(r)
+            conn.commit()
+        except Exception as e:
+            logger.error(f"DB Flush Error: {e}")
+        finally:
+            conn.close()
+
+def get_db_connection():
+    if not DATABASE_URL:
+        # Fallback if unconfigured
+        logger.warning("DATABASE_URL not set.")
+        return None
+    try:
+        return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        logger.error(f"DB Connect Error: {e}")
+        return None
+
+def init_db():
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS events (
+                        id SERIAL PRIMARY KEY,
+                        container VARCHAR(255),
+                        event VARCHAR(255),
+                        details JSONB,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS container_state (
+                        container VARCHAR(255) PRIMARY KEY,
+                        restart_count INT DEFAULT 0,
+                        last_restart TIMESTAMP
+                    );
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tracked_pods (
+                        pod VARCHAR(255) PRIMARY KEY,
+                        tracked BOOLEAN DEFAULT TRUE
+                    );
+                """)
+            conn.commit()
+        except Exception as e:
+            logger.error(f"DB Init Error: {e}")
+        finally:
+            conn.close()
+
+init_db()
+
+tracked_pods_cache = None
+
+def get_tracked_pods():
+    global tracked_pods_cache
+    if tracked_pods_cache is not None:
+        return tracked_pods_cache
+    tracked_pods_cache = {}
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pod, tracked FROM tracked_pods")
+                for row in cur.fetchall():
+                    tracked_pods_cache[row[0]] = row[1]
+        finally:
+            conn.close()
+    return tracked_pods_cache
+
+def set_pod_tracking(pod, tracked):
+    global tracked_pods_cache
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO tracked_pods (pod, tracked) VALUES (%s, %s) ON CONFLICT (pod) DO UPDATE SET tracked = EXCLUDED.tracked", (pod, tracked))
+            conn.commit()
+            if tracked_pods_cache is not None:
+                tracked_pods_cache[pod] = tracked
+        finally:
+            conn.close()
+
+def record_event(container_name, event_type, details):
+    timestamp = datetime.now()
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO events (container, event, details, timestamp) VALUES (%s, %s, %s, %s)",
+                    (container_name, event_type, json.dumps(details), timestamp)
+                )
+            conn.commit()
+            flush_db_queue()
+        except Exception as e:
+            logger.error(f"DB Record Event Error: {e}")
+            db_queue.append({'type': 'event', 'container': container_name, 'event': event_type, 'details': details, 'timestamp': timestamp})
+        finally:
+            conn.close()
+    else:
+        db_queue.append({'type': 'event', 'container': container_name, 'event': event_type, 'details': details, 'timestamp': timestamp})
+
+def check_can_restart(container_name):
+    conn = get_db_connection()
+    if not conn:
+        return True
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM container_state WHERE container = %s", (container_name,))
+            row = cur.fetchone()
+            if not row:
+                return True
+            last_restart = row['last_restart']
+            if last_restart and last_restart > datetime.now() - timedelta(hours=1):
+                return False
+            return True
+    finally:
+        conn.close()
+
+def record_restart(container_name):
+    timestamp = datetime.now()
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO container_state (container, restart_count, last_restart) 
+                    VALUES (%s, 1, %s)
+                    ON CONFLICT (container) DO UPDATE 
+                    SET restart_count = container_state.restart_count + 1,
+                        last_restart = EXCLUDED.last_restart
+                """, (container_name, timestamp, timestamp))
+            conn.commit()
+            flush_db_queue()
+        except Exception as e:
+            db_queue.append({'type': 'restart', 'container': container_name, 'timestamp': timestamp})
+        finally:
+            conn.close()
+    else:
+        db_queue.append({'type': 'restart', 'container': container_name, 'timestamp': timestamp})
+
+def get_restart_count(container_name):
+    count = 0
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT restart_count FROM container_state WHERE container = %s", (container_name,))
+                row = cur.fetchone()
+                count = row['restart_count'] if row else 0
+        finally:
+            conn.close()
+            
+    count += len([q for q in db_queue if q['type'] == 'restart' and q['container'] == container_name])
+    return count
 
 
 def get_docker_client():
-    """Lazily initialize Docker client."""
     global docker_client
     if docker_client is None:
         docker_client = docker.from_env()
     return docker_client
 
 def get_container_logs(container_name):
-    """Fetch last N lines from a container."""
     try:
         container = get_docker_client().containers.get(container_name)
         logs = container.logs(
@@ -55,57 +283,37 @@ def get_container_logs(container_name):
             timestamps=True
         ).decode("utf-8")
         return logs
-    except docker.errors.NotFound:
-        logger.warning(f"Container '{container_name}' not found. Skipping.")
+    except:
         return None
-    except docker.errors.APIError as e:
-        logger.error(f"Docker API error for {container_name}: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error fetching logs for {container_name}: {e}")
-        return None
-
 
 def detect_errors(logs):
-    """Check if logs contain error patterns."""
     error_patterns = [
-        "error", "exception", "traceback", "failed", "crash",
-        "fatal", "panic", "segmentation fault", "out of memory",
-        "killed", "oomkiller", "connection refused", "timeout",
-        "permission denied", "no such file", "errno","internal server error","500","302"
+        "error","exception","traceback","failed","crash",
+        "fatal","panic","out of memory","killed","timeout",
+        "permission denied","errno","500","302"
     ]
     logs_lower = logs.lower()
-    found = []
-    for pattern in error_patterns:
-        if pattern in logs_lower:
-            found.append(pattern)
-    return found
+    return [p for p in error_patterns if p in logs_lower]
 
+error_cache = {}
 
-def is_new_error(container_name, logs):
-    """Check if this is a new error or the same one we already diagnosed."""
-    log_hash = hash(logs[-200:])  # Hash last 200 chars
-    if last_error_seen.get(container_name) == log_hash:
-        return False
-    last_error_seen[container_name] = log_hash
+def is_new_error(container_name, error_patterns):
+    pattern_key = ','.join(sorted(error_patterns))
+    key = f"{container_name}:{pattern_key}"
+    if key in error_cache:
+        if datetime.now() < error_cache[key]:
+            return False
+    error_cache[key] = datetime.now() + timedelta(hours=1)
     return True
-
 
 def check_rate_limit():
-    """Ensure we don't spam Gemini with too many requests."""
     global rate_limit_counter, rate_limit_reset
 
-    now = datetime.now()
-    if now > rate_limit_reset:
+    if datetime.now() > rate_limit_reset:
         rate_limit_counter.clear()
-        rate_limit_reset = now + timedelta(hours=1)
+        rate_limit_reset = datetime.now() + timedelta(hours=1)
 
-    total = sum(rate_limit_counter.values())
-    if total >= MAX_DIAGNOSES:
-        logger.warning(f"Rate limit reached ({total}/{MAX_DIAGNOSES} per hour). Skipping diagnosis.")
-        return False
-    return True
-
+    return sum(rate_limit_counter.values()) < MAX_DIAGNOSES
 
 def diagnose_with_gemini(container_name, logs, error_patterns):
     if not check_rate_limit():
@@ -114,258 +322,462 @@ def diagnose_with_gemini(container_name, logs, error_patterns):
     rate_limit_counter[container_name] += 1
 
     prompt = f"""
-You are a DevOps expert analyzing container logs.
-
 Container: {container_name}
-Detected patterns: {', '.join(error_patterns)}
-
+Errors: {error_patterns}
 Logs:
 {logs}
 
-Respond ONLY in JSON:
+Return pure JSON without any markdown formatting:
 {{
-    "root_cause": "",
-    "severity": "low|medium|high",
-    "suggested_fix": "",
-    "auto_restart_safe": true or false
+  "root_cause": "Detailed explanation of the issue.",
+  "severity": "low|medium|high",
+  "suggested_fix": "High level fix.",
+  "auto_restart_safe": true,
+  "config_suggestions": ["ENV_VAR=value"],
+  "likely_recurring": true,
+  "estimated_impact": "Details of impact.",
+  "target_file": "/path/example.py",
+  "exact_changes": "Change X to Y"
 }}
 """
 
     try:
-        response = model.generate_content(prompt)
-        return response.text
+        res = model.generate_content(prompt)
+        txt = res.text
+        return json.loads(txt[txt.find("{"):txt.rfind("}")+1])
     except Exception as e:
-        logger.error(f"Gemini API error: {e}")
+        logger.error(f"Gemini error: {e}")
         return None
-
-def parse_diagnosis(diagnosis_text):
-    """Extract JSON from GEMINI's response."""
-    if not diagnosis_text:
-        return None
-    try:
-        start = diagnosis_text.find("{")
-        end = diagnosis_text.rfind("}") + 1
-        if start >= 0 and end > start:
-            json_str = diagnosis_text[start:end]
-            return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON parse error: {e}")
-        logger.debug(f"Raw response: {diagnosis_text}")
-    except Exception as e:
-        logger.error(f"Failed to parse diagnosis: {e}")
-    return None
-
 
 def apply_fix(container_name, diagnosis):
-    """Apply auto-fixes if safe."""
     if not AUTO_FIX:
-        logger.info(f"Auto-fix disabled globally. Skipping {container_name}.")
         return False
-
     if not diagnosis.get("auto_restart_safe"):
-        logger.info(f"Gemini says restart is unsafe for {container_name}. Skipping.")
         return False
-
-    # Don't restart the same container more than 3 times per hour
-    recent_fixes = [
-        t for t in fix_history[container_name]
-        if t > datetime.now() - timedelta(hours=1)
-    ]
-    if len(recent_fixes) >= 3:
-        logger.warning(
-            f"Container {container_name} already restarted {len(recent_fixes)} "
-            f"times this hour. Something deeper is wrong. Skipping."
-        )
-        send_slack_alert(
-            container_name, diagnosis,
-            extra="REPEATED FAILURE: This container has been restarted 3+ times "
-                  "in the last hour. Manual intervention needed."
-        )
+    
+    if not check_can_restart(container_name):
         return False
 
     try:
-        container = get_docker_client().containers.get(container_name)
-        logger.info(f"Restarting container {container_name}...")
-        container.restart(timeout=30)
-        fix_history[container_name].append(datetime.now())
-        logger.info(f"Container {container_name} restarted successfully")
+        c = get_docker_client().containers.get(container_name)
+        c.restart()
+        record_restart(container_name)
 
-        # Verify it's actually running after restart
-        time.sleep(5)
-        container.reload()
-        if container.status != "running":
-            logger.error(f"Container {container_name} failed to start after restart")
-            return False
+        record_event(container_name, "restart", {
+            "reason": diagnosis.get("root_cause")
+        })
 
         return True
     except Exception as e:
-        logger.error(f"Failed to restart {container_name}: {e}")
+        record_event(container_name, "restart_failed", {"error": str(e)})
         return False
 
+def get_container_infrastructure(container_name):
+    try:
+        c = get_docker_client().containers.get(container_name)
+        pod = c.labels.get('com.docker.compose.project', 'standalone')
+        networks = c.attrs.get('NetworkSettings', {}).get('Networks', {})
+        namespace = list(networks.keys())[0] if networks else "default-net"
+        return namespace, pod
+    except:
+        return "Unknown", "Unknown"
 
 def send_slack_alert(container_name, diagnosis, extra=""):
-    """Send diagnosis to Slack."""
     if not SLACK_WEBHOOK:
         return
-
-    severity_emoji = {
-        "low": "🟡",
-        "medium": "🟠",
-        "high": "🔴"
-    }
-
-    severity = diagnosis.get("severity", "unknown")
-    emoji = severity_emoji.get(severity, "⚪")
-
-    blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"{emoji} Container Doctor Alert: {container_name}"
-            }
-        },
-        {
-            "type": "section",
-            "fields": [
-                {"type": "mrkdwn", "text": f"*Severity:* {severity}"},
-                {"type": "mrkdwn", "text": f"*Container:* `{container_name}`"},
-                {"type": "mrkdwn", "text": f"*Root Cause:* {diagnosis.get('root_cause', 'Unknown')}"},
-                {"type": "mrkdwn", "text": f"*Fix:* {diagnosis.get('suggested_fix', 'N/A')}"},
-            ]
-        }
-    ]
-
-    if diagnosis.get("config_suggestions"):
-        suggestions = "\n".join(
-            f"• `{s}`" for s in diagnosis["config_suggestions"]
-        )
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Config Suggestions:*\n{suggestions}"
-            }
-        })
-
-    if extra:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*⚠️ {extra}*"}
-        })
-
+    namespace, pod = get_container_infrastructure(container_name)
     try:
-        requests.post(SLACK_WEBHOOK, json={"blocks": blocks}, timeout=10)
+        requests.post(SLACK_WEBHOOK, json={
+            "text":
+            f"🚨 *Container Doctor Alert: {container_name}*\n"
+            f"• *Namespace/Cluster*: `{namespace}`\n"
+            f"• *Docker Pod*: `{pod}`\n\n"
+            f"*Severity*: {str(diagnosis.get('severity', 'Unknown')).upper()}\n"
+            f"*Root Cause*: {diagnosis.get('root_cause', 'N/A')}\n"
+            f"*Suggested Fix*: {diagnosis.get('suggested_fix', 'N/A')}\n"
+            f"*Impact*: {diagnosis.get('estimated_impact', 'N/A')}\n"
+            f"*Safe to Auto-Restart*: {diagnosis.get('auto_restart_safe', 'Unknown')}\n"
+            f"*Configurations Needed*: {diagnosis.get('config_suggestions', [])}\n"
+            f"_{extra}_"
+        })
+    except:
+        pass
+
+def send_email_alert(container_name, diagnosis):
+    if not SMTP_SERVER or not SMTP_RECIPIENT:
+        return
+    namespace, pod = get_container_infrastructure(container_name)
+    try:
+        msg = EmailMessage()
+        sev_label = "HIGH SEVERITY Alert" if diagnosis.get('severity') != "resolved" else "RESOLVED Alert"
+        msg['Subject'] = f"{sev_label}: {container_name} [{pod}]"
+        msg['From'] = SMTP_USER
+        msg['To'] = SMTP_RECIPIENT
+        msg.set_content(
+            f"Docker Agent Diagnostic Report\n"
+            f"=================================\n"
+            f"Container: {container_name}\n"
+            f"Namespace: {namespace}\n"
+            f"Pod Group: {pod}\n\n"
+            f"Severity: {str(diagnosis.get('severity', 'Unknown')).upper()}\n\n"
+            f"Root Cause:\n{diagnosis.get('root_cause', 'N/A')}\n\n"
+            f"Recommended Fix:\n{diagnosis.get('suggested_fix', 'N/A')}\n\n"
+            f"Expected Impact:\n{diagnosis.get('estimated_impact', 'N/A')}\n\n"
+            f"Auto-Restart Safe: {diagnosis.get('auto_restart_safe', 'Unknown')}\n"
+            f"Likely Recurring: {diagnosis.get('likely_recurring', 'Unknown')}\n"
+            f"Configuration Fixes: {diagnosis.get('config_suggestions', [])}\n\n"
+            f"Target Code File: {diagnosis.get('target_file', 'None')}\n"
+            f"Exact Changes Required:\n{diagnosis.get('exact_changes', 'None')}\n"
+        )
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            if SMTP_USER and SMTP_PASS:
+                server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
     except Exception as e:
-        logger.error(f"Slack notification failed: {e}")
+        logger.error(f"SMTP Error: {e}")
 
+# ------------- ROUTES -------------
 
-# --- Health Check Endpoint ---
+@app.route("/")
+def index():
+    return send_file("dashboard.html")
+
 @app.route("/health")
 def health():
-    """Health check endpoint for the doctor itself."""
-    try:
-        get_docker_client().ping()
-        docker_ok = True
-    except:
-        docker_ok = False
+    containers_status = {}
+
+    for name in TARGET_CONTAINERS:
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            c = get_docker_client().containers.get(name)
+            c.reload()
+            containers_status[name] = {
+                "status": c.status,
+                "restarts": get_restart_count(name)
+            }
+        except:
+            containers_status[name] = {
+                "status": "not_found",
+                "restarts": 0
+            }
+
+    events_count = len([q for q in db_queue if q['type'] == 'event'])
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM events")
+                events_count += cur.fetchone()[0]
+        finally:
+            conn.close()
 
     return jsonify({
-        "status": "healthy" if docker_ok else "degraded",
-        "docker_connected": docker_ok,
-        "monitoring": TARGET_CONTAINERS,
-        "total_diagnoses": len(diagnosis_history),
-        "fixes_applied": {k: len(v) for k, v in fix_history.items()},
-        "rate_limit_remaining": MAX_DIAGNOSES - sum(rate_limit_counter.values()),
-        "uptime_check": datetime.now().isoformat()
+        "containers": containers_status,
+        "events": events_count,
+        "timestamp": datetime.now().isoformat()
     })
 
+from flask import request
 
 @app.route("/history")
 def history():
-    """Return recent diagnosis history."""
-    return jsonify(diagnosis_history[-50:])
+    conn = get_db_connection()
+    recent = []
+    
+    mem_events = [q for q in db_queue if q['type'] == 'event']
+    events_count = len(mem_events)
 
+    target_date = request.args.get('date', None)
+    
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if target_date:
+                    cur.execute("SELECT COUNT(*) as count FROM events WHERE DATE(timestamp) = %s", (target_date,))
+                else:
+                    cur.execute("SELECT COUNT(*) as count FROM events")
+                events_count += cur.fetchone()['count']
+
+                if target_date:
+                    cur.execute("SELECT container, event, details, timestamp FROM events WHERE DATE(timestamp) = %s ORDER BY timestamp DESC LIMIT 50", (target_date,))
+                else:    
+                    cur.execute("SELECT container, event, details, timestamp FROM events ORDER BY timestamp DESC LIMIT 50")
+                for row in cur.fetchall():
+                    item = dict(row)
+                    item['timestamp'] = item['timestamp'].isoformat()
+                    recent.append(item)
+        except Exception as e:
+            logger.error(f"DB History Error: {e}")
+        finally:
+            conn.close()
+
+    for m in mem_events:
+        # Simple date filtering for in-memory queue
+        if target_date and not m['timestamp'].isoformat().startswith(target_date):
+            continue
+        recent.append({
+            'container': m['container'],
+            'event': m['event'],
+            'details': m['details'],
+            'timestamp': m['timestamp'].isoformat()
+        })
+    recent.sort(key=lambda x: str(x['timestamp']), reverse=True)
+    recent = recent[:50]
+
+    return jsonify({
+        "total_events": events_count,
+        "recent": recent
+    })
+
+
+@app.route("/stats")
+def stats():
+    try:
+        tp = get_tracked_pods()
+        containers = get_docker_client().containers.list(all=True)
+        total_pods = len(set(c.labels.get('com.docker.compose.project', 'standalone') for c in containers))
+        tracked = sum(1 for p, t in tp.items() if t)
+        
+        healthy = 0
+        broken = 0
+        for c in containers:
+            status = "healthy"
+            diagnostics = incident_state.get(c.name, {})
+            if c.status in ["exited", "dead", "created"] or diagnostics.get("status") == "broken":
+                status = "broken"
+            if status == "healthy":
+                healthy += 1
+            else:
+                broken += 1
+                
+        return jsonify({
+            "total_pods": total_pods,
+            "tracked_pods": tracked,
+            "healthy_containers": healthy,
+            "broken_containers": broken
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/pods")
+def pods():
+    try:
+        tp = get_tracked_pods()
+        # Orchestrator grouping: Namespace -> Pod (Project) -> Containers
+        namespaces = {}
+
+        for c in get_docker_client().containers.list(all=True):
+            pod = c.labels.get('com.docker.compose.project', 'standalone')
+            
+            networks = c.attrs.get('NetworkSettings', {}).get('Networks', {})
+            namespace = list(networks.keys())[0] if networks else "default-net"
+            
+            if pod not in tp:
+                set_pod_tracking(pod, True)
+                tp = get_tracked_pods()
+                
+            if namespace not in namespaces:
+                namespaces[namespace] = {}
+                
+            if pod not in namespaces[namespace]:
+                namespaces[namespace][pod] = {
+                    "name": pod,
+                    "tracked": tp.get(pod, True),
+                    "containers": []
+                }
+                
+            status = "healthy"
+            diagnostics = incident_state.get(c.name, {})
+            if c.status in ["exited", "dead", "created"] or diagnostics.get("status") == "broken":
+                status = "broken"
+                
+            namespaces[namespace][pod]["containers"].append({
+                "name": c.name,
+                "status": c.status,
+                "health": status,
+                "image": ', '.join(c.image.tags) if c.image.tags else c.image.short_id
+            })
+            
+        payload = []
+        for ns, pods_dict in namespaces.items():
+            payload.append({
+                "namespace": ns,
+                "pods": list(pods_dict.values())
+            })
+            
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/pods/track/<pod>", methods=["POST"])
+def toggle_pod_tracking(pod):
+    try:
+        data = request.json
+        tracked = data.get('tracked', True)
+        set_pod_tracking(pod, tracked)
+        return jsonify({"pod": pod, "tracked": tracked})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/diagnostics/<container_name>")
+def get_diagnosis(container_name):
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 1. Look for explicit Gemini Diagnosis
+                cur.execute("SELECT details FROM events WHERE container = %s AND event = 'diagnosis' ORDER BY timestamp DESC LIMIT 1", (container_name,))
+                row = cur.fetchone()
+                if row:
+                    return jsonify(row['details'])
+                
+                # 2. Fallback to generic System Errors if Gemini didn't fire
+                cur.execute("SELECT event, details FROM events WHERE container = %s AND event IN ('restart_failed', 'status_check_failed', 'container_down') ORDER BY timestamp DESC LIMIT 1", (container_name,))
+                sys_row = cur.fetchone()
+                if sys_row:
+                    err_text = sys_row['details'].get('error', sys_row['details'].get('status', 'Unknown system failure'))
+                    fallback = {
+                        "root_cause": f"System Check Failed ({sys_row['event']}): {err_text}",
+                        "severity": "high",
+                        "suggested_fix": "Review Docker daemon logs, check port allocations, or verify image architecture.",
+                        "auto_restart_safe": False,
+                        "config_suggestions": ["Restart Docker Service", "Check Port Bindings"],
+                        "likely_recurring": True,
+                        "estimated_impact": "Container failed to initialize or mount."
+                    }
+                    return jsonify(fallback)
+
+                return jsonify({"error": "No diagnostics found"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        finally:
+            conn.close()
+    return jsonify({"error": "DB disconnected"}), 500
+
+@app.route("/logs/<container_name>")
+def current_logs(container_name):
+    try:
+        c = get_docker_client().containers.get(container_name)
+        logs = c.logs(tail=100, timestamps=True).decode("utf-8")
+        return jsonify({"container": container_name, "logs": logs})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+incident_state = {}
 
 def monitor_containers():
-    """Main monitoring loop."""
-    logger.info(f"Container Doctor starting up")
-    logger.info(f"Monitoring: {TARGET_CONTAINERS}")
-    logger.info(f"Check interval: {CHECK_INTERVAL}s")
-    logger.info(f"Auto-fix: {AUTO_FIX}")
-    logger.info(f"Rate limit: {MAX_DIAGNOSES}/hour")
-
+    # Wait for DB to be initialized and accessible
+    time.sleep(5)
+    global incident_state
+    
     while True:
-        for container_name in TARGET_CONTAINERS:
-            container_name = container_name.strip()
-            if not container_name:
+        try:
+            containers = get_docker_client().containers.list(all=True)
+        except Exception as e:
+            logger.error(f"Failed to fetch docker containers: {e}")
+            time.sleep(5)
+            continue
+
+        for c in containers:
+            container_name = c.name
+            pod = c.labels.get('com.docker.compose.project', 'standalone')
+            
+            tp = get_tracked_pods()
+            if pod not in tp:
+                set_pod_tracking(pod, True)
+                tp = get_tracked_pods()
+                
+            if not tp.get(pod, True):
+                continue # Skip untracked pods from engaging with Gemini or Auto-restarts.
+
+            # CONTAINER DOWN DETECTION
+            try:
+                c.reload()
+
+                if c.status in ["exited", "dead", "created"]:
+                    incident_state[container_name] = {'status': 'broken', 'healthy_checks': 0}
+                    logger.warning(f"Detected status {c.status} for {container_name}")
+
+                    record_event(container_name, "container_down", {
+                        "status": c.status
+                    })
+
+                    if check_can_restart(container_name):
+                        c.restart()
+                        record_restart(container_name)
+                        rcount = get_restart_count(container_name)
+                        logger.info(f"Restart count for {container_name}: {rcount}")
+                        record_event(container_name, "auto_restart", {
+                            "status": "success",
+                            "restart_count": rcount
+                        })
+                    else:
+                        logger.warning(f"Skipping restart (loop prevention) for {container_name}")
+                        send_slack_alert(
+                            container_name, 
+                            {"severity": "medium", "root_cause": "Container stuck in crash loop. Auto-restart skipped.", "suggested_fix": "Manual intervention required."}, 
+                            extra="Loop Prevented"
+                        )
+                    continue
+            except Exception as e:
+                logger.error(f"Status check failed for {container_name}: {e}")
+                record_event(container_name, "status_check_failed", {"error": str(e)})
                 continue
 
             logs = get_container_logs(container_name)
-            if not logs:
+            if logs is None:
                 continue
 
             error_patterns = detect_errors(logs)
-            if not error_patterns:
+            is_new = False
+            if error_patterns:
+                is_new = is_new_error(container_name, error_patterns)
+
+            # If no errors OR the errors are completely stale (already processed)
+            if not error_patterns or not is_new:
+                if incident_state.get(container_name, {}).get('status') == 'broken':
+                    incident_state.setdefault(container_name, {})['healthy_checks'] += 1
+                    if incident_state[container_name]['healthy_checks'] >= 3:
+                        incident_state[container_name] = {'status': 'healthy', 'healthy_checks': 0}
+                        record_event(container_name, "resolved", {"message": "Container has recovered and is healthy."})
+                        send_slack_alert(container_name, {"severity": "low", "root_cause": "System healed.", "estimated_impact": "None"}, extra="RESOLVED: Healthy Again! 🟢")
+                        send_email_alert(container_name, {"severity": "resolved", "root_cause": "State Recovered", "suggested_fix": "None", "config_suggestions": [], "target_file": "", "exact_changes": "", "estimated_impact": "Operations restored."})
+                if not is_new and error_patterns:
+                    continue # Skip Gemini for stale errors
                 continue
+            
+            incident_state[container_name] = {'status': 'broken', 'healthy_checks': 0}
 
-            # Skip if we already diagnosed this exact error
-            if not is_new_error(container_name, logs):
-                continue
+            logger.warning(f"Errors detected in {container_name}: {error_patterns}")
+            # Silently handle the patterns without logging them directly into History
 
-            logger.warning(
-                f"Errors detected in {container_name}: {error_patterns}"
-            )
-
-            diagnosis_text = diagnose_with_gemini(
-                container_name, logs, error_patterns
-            )
-            if not diagnosis_text:
-                continue
-
-            diagnosis = parse_diagnosis(diagnosis_text)
+            diagnosis = diagnose_with_gemini(container_name, logs, error_patterns)
             if not diagnosis:
-                logger.error("Failed to parse gemini's response. Skipping.")
                 continue
 
-            # Record it
-            diagnosis_history.append({
-                "container": container_name,
-                "timestamp": datetime.now().isoformat(),
-                "diagnosis": diagnosis,
-                "patterns": error_patterns
-            })
+            record_event(container_name, "diagnosis", diagnosis)
+            logger.info(f"{container_name}: {diagnosis.get('severity')}")
 
-            logger.info(
-                f"Diagnosis for {container_name}: "
-                f"severity={diagnosis.get('severity')}, "
-                f"cause={diagnosis.get('root_cause')}"
-            )
-
-            # Auto-fix only on high severity
             fixed = False
             if diagnosis.get("severity") == "high":
                 fixed = apply_fix(container_name, diagnosis)
 
-            # Always notify Slack
-            send_slack_alert(
-                container_name, diagnosis,
-                extra="Auto-restarted" if fixed else ""
-            )
+            sev = diagnosis.get("severity", "").lower()
+            if sev in ["medium", "high"]:
+                send_slack_alert(
+                    container_name, diagnosis,
+                    extra="Auto-restarted" if fixed else ""
+                )
+
+            if sev == "high":
+                send_email_alert(container_name, diagnosis)
 
         time.sleep(CHECK_INTERVAL)
 
-
 if __name__ == "__main__":
-    # Run Flask health endpoint in background
-    flask_thread = Thread(
-        target=lambda: app.run(host="0.0.0.0", port=8080, debug=False),
-        daemon=True
-    )
-    flask_thread.start()
-    logger.info("Health endpoint running on :8080")
-
-    try:
-        monitor_containers()
-    except KeyboardInterrupt:
-        logger.info("Container Doctor shutting down")
+    Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
+    monitor_containers()

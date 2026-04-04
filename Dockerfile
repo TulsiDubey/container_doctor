@@ -8,6 +8,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY container_doctor.py .
+COPY dashboard.html .
+COPY login.html .
 
 EXPOSE 8080
 
