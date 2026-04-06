@@ -1,98 +1,99 @@
-# 🐋 Container Doctor: Autonomous Docker SaaS Agent
+# 🩺 Container Doctor - Advanced SaaS Multi-Image Monitoring
 
-**Container Doctor** is a production-grade, AI-driven Docker monitoring agent. Unlike standard infrastructure logs, Container Doctor leverages the **Gemini 2.5 Flash** LLM pipeline to actively read crashing container signatures, structurally diagnose root causes, generate explicit codebase fixes, and natively execute safe auto-restart loops to heal your infrastructure.
-
-It acts as a self-hosted orchestrator dashboard allowing developers to monitor, segment, and repair generic Docker environments without manual log-diving.
-
-## ✨ Key Features
-- **Intelligent Diagnostics**: Generates JSON-formated payloads containing precise Root Causes, Code Level Fixes, Target Files, and Estimated Impact parameters for any broken container.
-- **Auto-Healing**: Predicts if an anomaly is `auto_restart_safe` and executes remediation loops cautiously (tracking cache limits to prevent infinite crash-loops). 
-- **Orchestrator-Style UI**: Synthesizes flat Docker containers into a grouped Hierarchical Tree mapping via **Namespaces** (Docker Networks) and **Pods** (Docker Compose Projects). 
-- **Agent Tracking States**: Disconnect specific pods dynamically from the tracking API via a live PostgreSQL cache database.
-- **Docker Hub Gateway**: Implements a strict session token Authentication Wall natively validating against Docker Hub's API registry. 
-- **Instant Alerting**: Comprehensive payload delivery detailing exactly what broke routing directly to your internal **Slack Webhooks** or fallback **SMTP Emails**.
-
-## 🛠 Tech Stack
-| Component | Technology | Description |
-|-----------|------------|-------------|
-| **Backend API** | Python (Flask) / Docker-SDK | Primary loop executing log analytics and Docker API commands. |
-| **Database Cache**| PostgreSQL | Persists incident tracking states and stores offline diagnostics. |
-| **Agent Intel** | Google Gemini (2.5-Flash) | Deciphers stack traces into high-fidelity actionable `.json` logic. |
-| **Web UI** | HTML / Inter-CSS / JS | Rich Dark-Mode Orchestrator styling with active asynchronous fetch APIs. |
+The **Container Doctor** is a production-grade SaaS observability platform designed to monitor, diagnose, and auto-heal containerized environments. By leveraging the **Gemini 1.5 Pro** LLM, the system transforms raw Docker logs and state metrics into actionable, human-readable insights with automated remediation capabilities.
 
 ---
 
-## 📂 Codebase Understanding
+## 🏗️ System Architecture
 
-### 1. `container_doctor.py`
-The absolute core of the agent. This file runs dual operations:
-1. **Flask App Server**: Runs a lightweight REST API bounded to a session-auth router (`@app.before_request`) exposing analytical endpoints to the UI.
-2. **Infinite Monitor Thread**: A daemon process endlessly analyzing active containers. If errors are discovered (`detect_errors()`) and validated against caching limits (`is_new_error()`), it invokes `diagnose_with_gemini()`, stores the report inside PostgreSQL, and executes remediation tasks.
+The application follows a **"Hub-and-Spoke"** architecture where a central observability agent (the Hub) manages local and remote containerized workloads.
 
-### 2. `dashboard.html` & `login.html`
-Secure Javascript mapping environments serving as the single-page application orchestrating the ecosystem. Includes the Docker Hub Web-API proxy logic for UI Access.
+### 🧩 High-Level Component Flow
+```mermaid
+graph TD
+    subgraph "Docker Host"
+        A[Runtime Containers] --- B[/var/run/docker.sock/]
+        B --- C[Doctor Hub Agent]
+    end
 
-### 3. `Dockerfile` & `docker-compose.yml`
-Container Doctor maps external volumes `/var/run/docker.sock` allowing the internal script to modify siblings running on the physical host machine dynamically.
+    subgraph "Cloud Integrations"
+        C --- D{Gemini 1.5 Pro AI}
+        C --- E[PostgreSQL Database]
+        C --- F[Alerting: Slack/SMTP]
+    end
 
----
+    subgraph "Consumer Layer"
+        G[Browser/Dashboard] --- H[Docker Hub Gateway]
+        H --- C
+    end
 
-## 🚀 Setup & Environment Configuration
-
-Ensure you have a `.env` configured exactly like this before deploying the Agent:
-```env
-GEMINI_API_KEY=AIzaSyCwuSsP...
-TARGET_CONTAINERS=web,api,db
-CHECK_INTERVAL=3
-LOG_LINES=50
-SLACK_WEBHOOK_URL=https://hooks.slack.com/...
-DATABASE_URL=postgres://user:pass@db:5432/mydb
-SECRET_KEY=long_random_auth_string
-
-# Optional
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=my_alert_bot@gmail.com
-SMTP_PASS=my_app_password
-SMTP_RECIPIENT=devops_team@domain.com
+    D -- "JSON Analysis" --> C
+    E -- "Persistence" --> C
 ```
 
-Deploy the network:
+---
+
+## ⚙️ How It Works: Internal Logic
+
+### 1. The Monitoring Loop
+The **Doctor Hub** initiates a high-concurrency background thread (`monitor_containers`) that polls the Docker SDK every `CHECK_INTERVAL` seconds. 
+- **State Check**: Detects containers that are `exited`, `dead`, or `created` but not running.
+- **Pattern Matching**: Scans the tail of STDOUT/STDERR logs for specific error signatures (e.g., `exception`, `panic`, `errno 500`).
+- **Telemetry**: Aggregates images into **Namespaces** (based on Docker Networks) and **Projects** (based on Docker Compose labels).
+
+### 2. AI-Driven Diagnostic Pipeline
+When an anomaly is detected, the **Gemini AI Engine** is triggered:
+1. **Context Extraction**: The Hub fetches the last `LOG_LINES` and performs an `inspect` call to gather environment variables and resource constraints.
+2. **Prompt Synthesis**: A structured prompt is sent to Gemini, providing the raw logs and identified error patterns.
+3. **JSON Synthesis**: Gemini parses the logs and returns a strict JSON payload containing:
+    - **Root Cause**: A technical explanation of the failure.
+    - **Severity**: Low, Medium, or High.
+    - **Auto-Restart Safe**: Boolean flag indicating if a restart will fix or worsen the state.
+    - **Remediation**: Specific config changes or target file edits.
+
+### 3. Alerting & Notification Flow
+Based on the Gemini diagnosis, the **Multi-Channel Alerting Engine** executes:
+- **Slack**: ARich-text block formatted notification with severity-coded headers.
+- **Email**: A comprehensive diagnostic report sent via TLS-encrypted SMTP.
+- **Infrastructure Context**: Every alert includes the specific **Namespace** and **Image Group** to ensure rapid localization.
+
+---
+
+## 💉 Auto-Healing & Persistence
+
+The "Doctor" isn't just an observer; it's a healer.
+
+- **Crash-Loop Prevention**: The system maintains a state lock in the **PostgreSQL** `container_state` table. If a container is restarted, the Hub tracks the `last_restart` timestamp. To prevent infinite loops, further auto-restarts are blocked for **60 minutes** for that specific container.
+- **Event Ledger**: Every diagnosis, terminal transition, and restart attempt is logged in the `events` table for historical audit trails and timeline visualization in the dashboard.
+
+---
+
+## 📡 API Reference Table
+
+| Endpoint | Method | Response Payload | Purpose |
+| :------- | :----- | :--------------- | :------ |
+| `/stats` | `GET` | `total_images`, `tracked_images`, `broken_containers` | real-time KPI overview metrics. |
+| `/images` | `GET` | Nested Namespace -> Image Tree | Hierarchy explorer for all cluster workloads. |
+| `/history` | `GET` | Event list (last 50) | Persistent timeline of system state changes. |
+| `/diagnostics/<name>` | `GET` | Full Gemini JSON Document | In-depth root-cause analysis for a specific node. |
+| `/images/track/<p>` | `POST` | `{"project": "X", "tracked": bool}` | Dynamically toggle monitoring scope for specific images. |
+
+---
+
+## 🚀 Deployment
+
+1. **Configure Environment**: Set `GEMINI_API_KEY`, `SLACK_WEBHOOK_URL`, and `DATABASE_URL` in `.env`.
+2. **Launch Stack**:
 ```bash
 docker compose up -d --build
 ```
-> Access your Gateway natively via `http://localhost:8080/`
+
+## 🧑‍💻 Technical Stack
+- **Engine**: Python 3.12 (Flask, Docker-SDK, Psycopg2).
+- **AI Layer**: Google Generative AI (Gemini 1.5 Pro).
+- **Storage**: PostgreSQL 15 (Relational persistence).
+- **UI**: Modern Vanilla JS (Glassmorphism design).
 
 ---
 
-## 🗄️ Database Architecture (PostgreSQL)
-
-The Agent leverages a relational database resolving stateless tracking faults:
-- **`events`**: Archives the granular system transitions (`container_down`, `restart_failed`, `resolved`) along with massive nested `JSONB` Gemini payloads for the UI dashboard.
-- **`container_state`**: A time-series cache regulating aggressive auto-restarts to prevent infinite loops from permanently overloading system CPUs. 
-- **`tracked_pods`**: A binary boolean cache persisting exactly which cluster segments you disconnected via the dashboard.
-
----
-
-## 📡 Endpoints Overview
-
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/` | `GET` | Main UI Endpoint. Secures session tokens and redirects to `/login` if offline. |
-| `/login` | `GET` | Returns `login.html` frontend gateway. |
-| `/api/login` | `POST` | Intercepts Username/Password dict, testing validity across official Docker Hub Registries natively. |
-| `/history` | `GET` | Fetches the last 50 system transitions from PostgreSQL for Dashboard timelines. |
-| `/stats` | `GET` | Delivers real-time numerical arrays (`tracked_pods`, `broken_containers`) for visual KPI widgets. |
-| `/pods` | `GET` | Extracts Docker Networks generating a massive, highly-nested hierarchical Namespace -> Pod tree for the Workloads explorer. |
-| `/diagnostics/<name>` | `GET` | Securely queries the database fallback mapping yielding standard Gemini diagnostic structures for broken namespaces. |
-| `/pods/track/<pod>` | `POST` | Toggles the active agent connection scope caching to PostgreSQL dynamically. |
-
----
-
-## 🔮 Future Enhancements (Roadmap)
-
-To push the Docker Agent into the absolute peak of System Admin utilization, the following enhancements could be drafted:
-1. **Native Kubernetes Ingress Setup**: Transitioning the `docker.socket` binding over into a physical Helm chart managing `CRD` (Custom Resource Definitions) natively across minikube boundaries.
-2. **Advanced Mitigation (Auto-Patching)**: Because Gemini now outputs `target_file` and `config_suggestions`, the Agent could theoretically clone a Git repo locally dynamically, edit the `Dockerfile` parameter directly, and trigger an explicit `docker compose build` executing the repair natively without humans!
-3. **Hardware Analytics**: Utilizing `c.stats()` to push CPU and RAM Memory mapping onto the Dashboard via Charts.JS streams dynamically, warning users right before OOM (Out Of Memory) breaks transpire!
-4. **Custom Role-Based Auth (RBAC)**: Generating multiple local Agent dashboards based on custom defined `View-Only` vs `Admin` permissions.
+**Built by Antigravity - Advanced Agentic Coding Team**

@@ -1,11 +1,8 @@
-version: '3.8'
-
 services:
-  container_doctor:
+  doctor_hub:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: container_doctor
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -27,6 +24,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - doctor-net
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -44,6 +43,8 @@ services:
     container_name: web
     ports:
       - "80:80"
+    networks:
+      - doctor-net
     restart: unless-stopped
 
   api:
@@ -56,15 +57,19 @@ services:
       - POOL_SIZE=20
     depends_on:
       - db
+    networks:
+      - doctor-net
     restart: unless-stopped
 
   tunnel:
     image: cloudflare/cloudflared:latest
     container_name: cloudflare_tunnel
-    command: tunnel --url http://container_doctor:8080
+    command: tunnel --url http://doctor_hub:8080
+    networks:
+      - doctor-net
     restart: always
     depends_on:
-      - container_doctor
+      - doctor_hub
 
   db:
     image: postgres:15
@@ -75,6 +80,8 @@ services:
       - POSTGRES_USER=tulsi1
       - POSTGRES_PASSWORD=Tulsi@2211
       - POSTGRES_DB=mydb
+    networks:
+      - doctor-net
     volumes:
       - db_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -84,6 +91,9 @@ services:
       timeout: 5s
       retries: 5
 
+networks:
+  doctor-net:
+    driver: bridge
+
 volumes:
   db_data:
-

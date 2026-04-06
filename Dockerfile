@@ -14,4 +14,3 @@ COPY login.html .
 EXPOSE 8080
 
 CMD ["python", "-u", "container_doctor.py"]
-

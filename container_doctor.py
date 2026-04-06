@@ -13,9 +13,8 @@ from collections import defaultdict
 from threading import Thread
 from flask import Flask, jsonify, send_file, request, session, redirect
 import google.generativeai as genai
-
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +48,7 @@ app.secret_key = os.getenv("SECRET_KEY", "docker_agent_secure_default_key_991823
 
 @app.before_request
 def require_login():
-    protected_paths = ["/", "/stats", "/pods", "/history"]
+    protected_paths = ["/", "/stats", "/images", "/history"]
     if request.path in protected_paths or request.path.startswith("/diagnostics") or request.path.startswith("/logs"):
         if not session.get("authenticated"):
             if request.path == "/":
@@ -102,7 +101,7 @@ def flush_db_queue():
                                 ON CONFLICT (container) DO UPDATE 
                                 SET restart_count = container_state.restart_count + 1,
                                     last_restart = EXCLUDED.last_restart
-                            """, (q['container'], q['timestamp'], q['timestamp']))
+                            """, (q['container'], q['timestamp']))
                         to_remove.append(q)
                     except Exception as loop_e:
                         logger.error(f"Failed to flush item: {loop_e}")
@@ -149,9 +148,11 @@ def init_db():
                         last_restart TIMESTAMP
                     );
                 """)
+                cur.execute("DROP TABLE IF EXISTS tracked_pods;") # Cleanup old schema
+                cur.execute("DROP TABLE IF EXISTS tracked_projects;") # Force refresh for naming sync
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS tracked_pods (
-                        pod VARCHAR(255) PRIMARY KEY,
+                    CREATE TABLE IF NOT EXISTS tracked_projects (
+                        project VARCHAR(255) PRIMARY KEY,
                         tracked BOOLEAN DEFAULT TRUE
                     );
                 """)
@@ -161,36 +162,48 @@ def init_db():
         finally:
             conn.close()
 
-init_db()
+def init_db_with_retry():
+    max_retries = 10
+    for i in range(max_retries):
+        try:
+            init_db()
+            logger.info("Database initialized successfully.")
+            return
+        except Exception as e:
+            logger.error(f"DB Init attempt {i+1} failed: {e}")
+            time.sleep(5)
+    logger.error("DB Init failed after multiple retries.")
 
-tracked_pods_cache = None
+init_db_with_retry()
 
-def get_tracked_pods():
-    global tracked_pods_cache
-    if tracked_pods_cache is not None:
-        return tracked_pods_cache
-    tracked_pods_cache = {}
+tracked_projects_cache = None
+
+def get_tracked_projects():
+    global tracked_projects_cache
+    if tracked_projects_cache is not None:
+        return tracked_projects_cache
+    tracked_projects_cache = {}
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT pod, tracked FROM tracked_pods")
+                cur.execute("SELECT project, tracked FROM tracked_projects")
                 for row in cur.fetchall():
-                    tracked_pods_cache[row[0]] = row[1]
+                    tracked_projects_cache[row[0]] = row[1]
         finally:
             conn.close()
-    return tracked_pods_cache
+    return tracked_projects_cache
 
-def set_pod_tracking(pod, tracked):
-    global tracked_pods_cache
+def set_project_tracking(project, tracked):
+    global tracked_projects_cache
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                cur.execute("INSERT INTO tracked_pods (pod, tracked) VALUES (%s, %s) ON CONFLICT (pod) DO UPDATE SET tracked = EXCLUDED.tracked", (pod, tracked))
+                cur.execute("INSERT INTO tracked_projects (project, tracked) VALUES (%s, %s) ON CONFLICT (project) DO UPDATE SET tracked = EXCLUDED.tracked", (project, tracked))
             conn.commit()
-            if tracked_pods_cache is not None:
-                tracked_pods_cache[pod] = tracked
+            if tracked_projects_cache is not None:
+                tracked_projects_cache[project] = tracked
         finally:
             conn.close()
 
@@ -375,23 +388,23 @@ def apply_fix(container_name, diagnosis):
 def get_container_infrastructure(container_name):
     try:
         c = get_docker_client().containers.get(container_name)
-        pod = c.labels.get('com.docker.compose.project', 'standalone')
+        project = c.labels.get('com.docker.compose.project', 'standalone')
         networks = c.attrs.get('NetworkSettings', {}).get('Networks', {})
         namespace = list(networks.keys())[0] if networks else "default-net"
-        return namespace, pod
+        return namespace, project
     except:
         return "Unknown", "Unknown"
 
 def send_slack_alert(container_name, diagnosis, extra=""):
     if not SLACK_WEBHOOK:
         return
-    namespace, pod = get_container_infrastructure(container_name)
+    namespace, image = get_container_infrastructure(container_name)
     try:
         requests.post(SLACK_WEBHOOK, json={
             "text":
             f"🚨 *Container Doctor Alert: {container_name}*\n"
             f"• *Namespace/Cluster*: `{namespace}`\n"
-            f"• *Docker Pod*: `{pod}`\n\n"
+            f"• *Docker image*: `{image}`\n\n"
             f"*Severity*: {str(diagnosis.get('severity', 'Unknown')).upper()}\n"
             f"*Root Cause*: {diagnosis.get('root_cause', 'N/A')}\n"
             f"*Suggested Fix*: {diagnosis.get('suggested_fix', 'N/A')}\n"
@@ -406,11 +419,11 @@ def send_slack_alert(container_name, diagnosis, extra=""):
 def send_email_alert(container_name, diagnosis):
     if not SMTP_SERVER or not SMTP_RECIPIENT:
         return
-    namespace, pod = get_container_infrastructure(container_name)
+    namespace, image = get_container_infrastructure(container_name)
     try:
         msg = EmailMessage()
         sev_label = "HIGH SEVERITY Alert" if diagnosis.get('severity') != "resolved" else "RESOLVED Alert"
-        msg['Subject'] = f"{sev_label}: {container_name} [{pod}]"
+        msg['Subject'] = f"{sev_label}: {container_name} [{image}]"
         msg['From'] = SMTP_USER
         msg['To'] = SMTP_RECIPIENT
         msg.set_content(
@@ -418,7 +431,7 @@ def send_email_alert(container_name, diagnosis):
             f"=================================\n"
             f"Container: {container_name}\n"
             f"Namespace: {namespace}\n"
-            f"Pod Group: {pod}\n\n"
+            f"image Group: {image}\n\n"
             f"Severity: {str(diagnosis.get('severity', 'Unknown')).upper()}\n\n"
             f"Root Cause:\n{diagnosis.get('root_cause', 'N/A')}\n\n"
             f"Recommended Fix:\n{diagnosis.get('suggested_fix', 'N/A')}\n\n"
@@ -536,9 +549,9 @@ def history():
 @app.route("/stats")
 def stats():
     try:
-        tp = get_tracked_pods()
+        tp = get_tracked_projects()
         containers = get_docker_client().containers.list(all=True)
-        total_pods = len(set(c.labels.get('com.docker.compose.project', 'standalone') for c in containers))
+        total_projects = len(set(c.labels.get('com.docker.compose.project', 'standalone') for c in containers))
         tracked = sum(1 for p, t in tp.items() if t)
         
         healthy = 0
@@ -554,38 +567,38 @@ def stats():
                 broken += 1
                 
         return jsonify({
-            "total_pods": total_pods,
-            "tracked_pods": tracked,
+            "total_images": total_projects,
+            "tracked_images": tracked,
             "healthy_containers": healthy,
             "broken_containers": broken
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/pods")
-def pods():
+@app.route("/images")
+def images():
     try:
-        tp = get_tracked_pods()
-        # Orchestrator grouping: Namespace -> Pod (Project) -> Containers
+        tp = get_tracked_projects()
+        # Orchestrator grouping: Namespace -> image (Project) -> Containers
         namespaces = {}
 
         for c in get_docker_client().containers.list(all=True):
-            pod = c.labels.get('com.docker.compose.project', 'standalone')
+            project = c.labels.get('com.docker.compose.project', 'standalone')
             
             networks = c.attrs.get('NetworkSettings', {}).get('Networks', {})
             namespace = list(networks.keys())[0] if networks else "default-net"
             
-            if pod not in tp:
-                set_pod_tracking(pod, True)
-                tp = get_tracked_pods()
+            if project not in tp:
+                set_project_tracking(project, True)
+                tp = get_tracked_projects()
                 
             if namespace not in namespaces:
                 namespaces[namespace] = {}
                 
-            if pod not in namespaces[namespace]:
-                namespaces[namespace][pod] = {
-                    "name": pod,
-                    "tracked": tp.get(pod, True),
+            if project not in namespaces[namespace]:
+                namespaces[namespace][project] = {
+                    "name": project,
+                    "tracked": tp.get(project, True),
                     "containers": []
                 }
                 
@@ -594,7 +607,7 @@ def pods():
             if c.status in ["exited", "dead", "created"] or diagnostics.get("status") == "broken":
                 status = "broken"
                 
-            namespaces[namespace][pod]["containers"].append({
+            namespaces[namespace][project]["containers"].append({
                 "name": c.name,
                 "status": c.status,
                 "health": status,
@@ -602,23 +615,23 @@ def pods():
             })
             
         payload = []
-        for ns, pods_dict in namespaces.items():
+        for ns, projects_dict in namespaces.items():
             payload.append({
                 "namespace": ns,
-                "pods": list(pods_dict.values())
+                "images": list(projects_dict.values())
             })
             
         return jsonify(payload)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/pods/track/<pod>", methods=["POST"])
-def toggle_pod_tracking(pod):
+@app.route("/images/track/<project>", methods=["POST"])
+def toggle_project_tracking(project):
     try:
         data = request.json
         tracked = data.get('tracked', True)
-        set_pod_tracking(pod, tracked)
-        return jsonify({"pod": pod, "tracked": tracked})
+        set_project_tracking(project, tracked)
+        return jsonify({"project": project, "tracked": tracked})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -684,15 +697,15 @@ def monitor_containers():
 
         for c in containers:
             container_name = c.name
-            pod = c.labels.get('com.docker.compose.project', 'standalone')
+            project = c.labels.get('com.docker.compose.project', 'standalone')
             
-            tp = get_tracked_pods()
-            if pod not in tp:
-                set_pod_tracking(pod, True)
-                tp = get_tracked_pods()
+            tp = get_tracked_projects()
+            if project not in tp:
+                set_project_tracking(project, True)
+                tp = get_tracked_projects()
                 
-            if not tp.get(pod, True):
-                continue # Skip untracked pods from engaging with Gemini or Auto-restarts.
+            if not tp.get(project, True):
+                continue # Skip untracked projects from engaging with Gemini or Auto-restarts.
 
             # CONTAINER DOWN DETECTION
             try:
