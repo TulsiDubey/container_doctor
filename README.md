@@ -1,6 +1,6 @@
 # 🩺 Container Doctor - Advanced SaaS Multi-Image Monitoring
 
-The **Container Doctor** is a production-grade SaaS observability platform designed to monitor, diagnose, and auto-heal containerized environments. By leveraging the **Gemini 1.5 Pro** LLM, the system transforms raw Docker logs and state metrics into actionable, human-readable insights with automated remediation capabilities.
+The **Container Doctor** is a production-grade SaaS observability platform designed to monitor, diagnose, and auto-heal containerized environments. By leveraging the **Gemini 1.5 flash** LLM, the system transforms raw Docker logs and state metrics into actionable, human-readable insights with automated remediation capabilities.
 
 ---
 
