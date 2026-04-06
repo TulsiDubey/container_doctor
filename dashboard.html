@@ -277,7 +277,7 @@
             color: #cbd5e1;
         }
 
-        /* Namespace/Image Layout */
+        /* Namespace/project Layout */
         .namespace-card {
             margin-bottom: 20px;
             border: 1px solid var(--glass-border);
@@ -299,11 +299,11 @@
             cursor: pointer;
         }
 
-        .image-group {
+        .project-group {
             border-top: 1px solid var(--glass-border);
         }
 
-        .image-header {
+        .project-header {
             padding: 12px 20px;
             background: rgba(30, 41, 59, 0.4);
             display: flex;
@@ -314,7 +314,7 @@
             border-bottom: 1px solid var(--glass-border);
         }
 
-        .image-badge {
+        .project-badge {
             font-size: 11px;
             padding: 3px 8px;
             background: rgba(255, 255, 255, 0.1);
@@ -503,7 +503,7 @@
             <h1>🐋 Docker Agent</h1>
         </div>
         <div class="nav-item active" onclick="switchTab('overview', this)">⚡ Overview</div>
-        <div class="nav-item" onclick="switchTab('explorer', this)">📦 Image Explorer</div>
+        <div class="nav-item" onclick="switchTab('explorer', this)">📦 Project Explorer</div>
         <div class="nav-item" onclick="switchTab('connections', this)">⚙️ Manage Settings</div>
         <div class="nav-item" onclick="switchTab('logs', this)">🖥️ Live Logs</div>
         <div class="nav-item" onclick="switchTab('history', this)">📜 Event History</div>
@@ -522,11 +522,11 @@
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-val" id="stat-total">0</div>
-                        <div class="stat-label">Total Images</div>
+                        <div class="stat-label">Total Projects</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-val" id="stat-tracked" style="color:var(--accent-blue)">0</div>
-                        <div class="stat-label">Tracked Images</div>
+                        <div class="stat-label">Tracked Projects</div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-val" id="stat-healthy" style="color:var(--low-severity)">0</div>
@@ -544,12 +544,12 @@
             </div>
 
             <div id="explorer" class="tab-content">
-                <div id="image-explorer-list">Loading Namespaces...</div>
+                <div id="project-explorer-list">Loading Namespaces...</div>
             </div>
 
             <div id="connections" class="tab-content">
                 <div class="glass" style="padding:20px;">
-                    <h2 style="margin-top:0">Manage Image Connections</h2>
+                    <h2 style="margin-top:0">Manage Project Connections</h2>
                     <p style="color:var(--text-secondary); font-size:14px;">Toggle which environments coordinate
                         securely with the Agent diagnostic backend.</p>
                     <div id="manage-connection-list" style="margin-top: 20px;">Loading connections...</div>
@@ -612,7 +612,7 @@
 
         async function toggleTracking(imagename, isCurrentlyTracked) {
             try {
-                await fetch(`/images/track/${imagename}`, {
+                await fetch(`/projects/track/${imagename}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ tracked: !isCurrentlyTracked })
@@ -653,12 +653,12 @@
             try {
                 const statRes = await fetch('/stats');
                 const statData = await statRes.json();
-                document.getElementById('stat-total').innerText = statData.total_images;
-                document.getElementById('stat-tracked').innerText = statData.tracked_images;
+                document.getElementById('stat-total').innerText = statData.total_projects;
+                document.getElementById('stat-tracked').innerText = statData.tracked_projects;
                 document.getElementById('stat-healthy').innerText = statData.healthy_containers;
                 document.getElementById('stat-broken').innerText = statData.broken_containers;
 
-                const pRes = await fetch('/images');
+                const pRes = await fetch('/projects');
                 const namespaces = await pRes.json();
 
                 let explorerHtml = '';
@@ -674,10 +674,10 @@
                         <div style="display:block;">
                     `;
 
-                    ns.images.forEach(imageGroup => {
+                    ns.projects.forEach(imageGroup => {
                         // Manager view
                         const trackBtn = imageGroup.tracked ?
-                            `<button class="btn-disconnect" onclick="toggleTracking('${imageGroup.name}', true)">Disconnect Namespace Image</button>` :
+                            `<button class="btn-disconnect" onclick="toggleTracking('${imageGroup.name}', true)">Disconnect Namespace project</button>` :
                             `<button class="btn-connect" onclick="toggleTracking('${imageGroup.name}', false)">Connect Agent</button>`;
                         const statusColor = imageGroup.tracked ? `<span style="color:var(--accent-blue)">● Active Connection</span>` : `<span style="color:var(--text-secondary)">○ Offline</span>`;
                         manageHtml += `<div style="display: flex; justify-content: space-between; padding: 15px; border-bottom: 1px solid var(--glass-border);">
@@ -695,7 +695,7 @@
 
                             containerRows += `<tr>
                                 <td><strong>${c.name}</strong></td>
-                                <td><span style="font-size:12px;color:var(--text-secondary)">${c.image}</span></td>
+                                <td><span style="font-size:12px;color:var(--text-secondary)">${c.project}</span></td>
                                 <td><span class="status-dot ${sc}"></span>${c.status}</td>
                                 <td>${diagBtn}</td>
                             </tr>`;
@@ -703,10 +703,10 @@
                         });
 
                         explorerHtml += `
-                            <div class="image-group">
-                                <div class="image-header">Cluster Image: ${imageGroup.name} <span class="image-badge">Linked: ${imageGroup.tracked ? 'Yes' : 'No'}</span></div>
+                            <div class="project-group">
+                                <div class="project-header">Cluster project: ${imageGroup.name} <span class="project-badge">Linked: ${imageGroup.tracked ? 'Yes' : 'No'}</span></div>
                                 <div class="table-responsive"><table>
-                                    <thead><tr><th>Container ID</th><th>Image Target</th><th>Daemon Status</th><th>Node Insight</th></tr></thead>
+                                    <thead><tr><th>Container ID</th><th>project Target</th><th>Daemon Status</th><th>Node Insight</th></tr></thead>
                                     <tbody>${containerRows}</tbody>
                                 </table></div>
                             </div>
@@ -717,7 +717,7 @@
                     explorerHtml += `</div></div>`;
                 });
 
-                document.getElementById('image-explorer-list').innerHTML = explorerHtml;
+                document.getElementById('project-explorer-list').innerHTML = explorerHtml;
                 document.getElementById('manage-connection-list').innerHTML = manageHtml;
 
                 const selector = document.getElementById('log-selector');

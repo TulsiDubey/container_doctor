@@ -48,7 +48,7 @@ app.secret_key = os.getenv("SECRET_KEY", "docker_agent_secure_default_key_991823
 
 @app.before_request
 def require_login():
-    protected_paths = ["/", "/stats", "/images", "/history"]
+    protected_paths = ["/", "/stats", "/projects", "/history"]
     if request.path in protected_paths or request.path.startswith("/diagnostics") or request.path.startswith("/logs"):
         if not session.get("authenticated"):
             if request.path == "/":
@@ -398,13 +398,13 @@ def get_container_infrastructure(container_name):
 def send_slack_alert(container_name, diagnosis, extra=""):
     if not SLACK_WEBHOOK:
         return
-    namespace, image = get_container_infrastructure(container_name)
+    namespace, project = get_container_infrastructure(container_name)
     try:
         requests.post(SLACK_WEBHOOK, json={
             "text":
             f"🚨 *Container Doctor Alert: {container_name}*\n"
             f"• *Namespace/Cluster*: `{namespace}`\n"
-            f"• *Docker image*: `{image}`\n\n"
+            f"• *Docker project*: `{project}`\n\n"
             f"*Severity*: {str(diagnosis.get('severity', 'Unknown')).upper()}\n"
             f"*Root Cause*: {diagnosis.get('root_cause', 'N/A')}\n"
             f"*Suggested Fix*: {diagnosis.get('suggested_fix', 'N/A')}\n"
@@ -419,11 +419,11 @@ def send_slack_alert(container_name, diagnosis, extra=""):
 def send_email_alert(container_name, diagnosis):
     if not SMTP_SERVER or not SMTP_RECIPIENT:
         return
-    namespace, image = get_container_infrastructure(container_name)
+    namespace, project = get_container_infrastructure(container_name)
     try:
         msg = EmailMessage()
         sev_label = "HIGH SEVERITY Alert" if diagnosis.get('severity') != "resolved" else "RESOLVED Alert"
-        msg['Subject'] = f"{sev_label}: {container_name} [{image}]"
+        msg['Subject'] = f"{sev_label}: {container_name} [{project}]"
         msg['From'] = SMTP_USER
         msg['To'] = SMTP_RECIPIENT
         msg.set_content(
@@ -431,7 +431,7 @@ def send_email_alert(container_name, diagnosis):
             f"=================================\n"
             f"Container: {container_name}\n"
             f"Namespace: {namespace}\n"
-            f"image Group: {image}\n\n"
+            f"project Group: {project}\n\n"
             f"Severity: {str(diagnosis.get('severity', 'Unknown')).upper()}\n\n"
             f"Root Cause:\n{diagnosis.get('root_cause', 'N/A')}\n\n"
             f"Recommended Fix:\n{diagnosis.get('suggested_fix', 'N/A')}\n\n"
@@ -567,19 +567,19 @@ def stats():
                 broken += 1
                 
         return jsonify({
-            "total_images": total_projects,
-            "tracked_images": tracked,
+            "total_projects": total_projects,
+            "tracked_projects": tracked,
             "healthy_containers": healthy,
             "broken_containers": broken
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/images")
-def images():
+@app.route("/projects")
+def projects():
     try:
         tp = get_tracked_projects()
-        # Orchestrator grouping: Namespace -> image (Project) -> Containers
+        # Orchestrator grouping: Namespace -> project (Project) -> Containers
         namespaces = {}
 
         for c in get_docker_client().containers.list(all=True):
@@ -611,21 +611,21 @@ def images():
                 "name": c.name,
                 "status": c.status,
                 "health": status,
-                "image": ', '.join(c.image.tags) if c.image.tags else c.image.short_id
+                "project": ', '.join(c.image.tags) if c.image.tags else c.image.short_id
             })
             
         payload = []
         for ns, projects_dict in namespaces.items():
             payload.append({
                 "namespace": ns,
-                "images": list(projects_dict.values())
+                "projects": list(projects_dict.values())
             })
             
         return jsonify(payload)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/images/track/<project>", methods=["POST"])
+@app.route("/projects/track/<project>", methods=["POST"])
 def toggle_project_tracking(project):
     try:
         data = request.json
@@ -655,7 +655,7 @@ def get_diagnosis(container_name):
                     fallback = {
                         "root_cause": f"System Check Failed ({sys_row['event']}): {err_text}",
                         "severity": "high",
-                        "suggested_fix": "Review Docker daemon logs, check port allocations, or verify image architecture.",
+                        "suggested_fix": "Review Docker daemon logs, check port allocations, or verify project architecture.",
                         "auto_restart_safe": False,
                         "config_suggestions": ["Restart Docker Service", "Check Port Bindings"],
                         "likely_recurring": True,
