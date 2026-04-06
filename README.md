@@ -90,7 +90,7 @@ docker compose up -d --build
 
 ## 🧑‍💻 Technical Stack
 - **Engine**: Python 3.12 (Flask, Docker-SDK, Psycopg2).
-- **AI Layer**: Google Generative AI (Gemini 1.5 Pro).
+- **AI Layer**: Google Generative AI (Gemini 1.5 Flash).
 - **Storage**: PostgreSQL 15 (Relational persistence).
 - **UI**: Modern Vanilla JS (Glassmorphism design).
 
