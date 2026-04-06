@@ -17,7 +17,7 @@ graph TD
     end
 
     subgraph "Cloud Integrations"
-        C --- D{Gemini 1.5 Pro AI}
+        C --- D{Gemini 1.5 flash AI}
         C --- E[PostgreSQL Database]
         C --- F[Alerting: Slack/SMTP]
     end
@@ -96,4 +96,3 @@ docker compose up -d --build
 
 ---
 
-**Built by Antigravity - Advanced Agentic Coding Team**
