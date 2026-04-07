@@ -1,0 +1,99 @@
+services:
+  doctor_hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - GEMINI_API_KEY=AIzaSyCwuSsPomoqGACzm8t4HH_BgFOdd3KoI0Y
+      - TARGET_CONTAINERS=web,api,db
+      - CHECK_INTERVAL=3
+      - LOG_LINES=50
+      - AUTO_FIX=true
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - MAX_DIAGNOSES_PER_HOUR=20
+      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
+      - SMTP_SERVER=${SMTP_SERVER:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_RECIPIENT=${SMTP_RECIPIENT:-}
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - doctor-net
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  web:
+    image: nginx:latest
+    container_name: web
+    ports:
+      - "80:80"
+    networks:
+      - doctor-net
+    restart: unless-stopped
+
+  api:
+    build: ./api
+    container_name: api
+    ports:
+      - "5000:5000"
+    environment:
+      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
+      - POOL_SIZE=20
+    depends_on:
+      - db
+    networks:
+      - doctor-net
+    restart: unless-stopped
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflare_tunnel
+    command: tunnel --url http://doctor_hub:8080
+    networks:
+      - doctor-net
+    restart: always
+    depends_on:
+      - doctor_hub
+
+  db:
+    image: postgres:15
+    container_name: db
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=tulsi1
+      - POSTGRES_PASSWORD=Tulsi@2211
+      - POSTGRES_DB=mydb
+    networks:
+      - doctor-net
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  doctor-net:
+    driver: bridge
+
+volumes:
+  db_data:

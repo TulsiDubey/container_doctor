@@ -1,0 +1,10 @@
+confluent-kafka
+sqlalchemy
+psycopg2-binary
+pgvector
+sentence-transformers
+ollama
+groq
+python-dotenv
+requests
+pydantic

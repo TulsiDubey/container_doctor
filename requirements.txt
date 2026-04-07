@@ -1,7 +1,16 @@
+# Combined Requirements for Local Execution
 docker==7.0.0
-anthropic>=0.28.0
-python-dotenv==1.0.0
 flask==3.0.0
+flask-cors
 requests==2.31.0
-google-generativeai
 psycopg2-binary
+sqlalchemy
+pgvector
+pydantic
+python-dotenv==1.0.0
+confluent-kafka
+sentence-transformers
+ollama
+groq
+pyyaml
+google-generativeai

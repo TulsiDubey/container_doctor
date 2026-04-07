@@ -1,0 +1,80 @@
+import docker
+import time
+from datetime import datetime, timedelta
+from shared.db import SessionLocal, Event
+
+class CircuitBreaker:
+    def __init__(self, threshold=3, window_minutes=60):
+        self.threshold = threshold
+        self.window = window_minutes
+        self.history = {} # {container_name: [timestamps]}
+
+    def is_open(self, container_name):
+        """
+        Check if the circuit is 'Open' (Actions Blocked).
+        """
+        now = datetime.utcnow()
+        if container_name not in self.history:
+            return False
+            
+        # Clean old timestamps
+        cutoff = now - timedelta(minutes=self.window)
+        self.history[container_name] = [t for t in self.history[container_name] if t > cutoff]
+        
+        return len(self.history[container_name]) >= self.threshold
+
+    def record_attempt(self, container_name):
+        self.history.setdefault(container_name, []).append(datetime.utcnow())
+
+class RecoveryManager:
+    def __init__(self):
+        self.docker_client = docker.from_env()
+        self.circuit_breaker = CircuitBreaker()
+
+    def execute_remediation(self, container_name, diagnosis):
+        """
+        Execute safe remediation with Canary and Circuit Breaker logic.
+        """
+        if self.circuit_breaker.is_open(container_name):
+            print(f"Recovery Halted: Circuit Breaker OPEN for {container_name}")
+            return False, "Circuit breaker triggered due to flapping."
+
+        self.circuit_breaker.record_attempt(container_name)
+
+        # 1. Configuration Fix (if suggested)
+        if diagnosis.get("config_suggestions"):
+             # In a real system, we'd apply env vars or volume mounts
+             pass
+
+        # 2. Canary Restart (Simulated orchestration)
+        try:
+            container = self.docker_client.containers.get(container_name)
+            print(f"Executing Canary Restart for {container_name}...")
+            
+            container.restart()
+            
+            # 3. Validation Phase (Wait for health)
+            success = self.verify_health(container_name)
+            if success:
+                return True, "Remediation Successful"
+            else:
+                return False, "Canary health check failed."
+                
+        except Exception as e:
+            return False, f"Recovery Error: {e}"
+
+    def verify_health(self, container_name, timeout=30):
+        """
+        Wait for container to reach healthy status.
+        """
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                container = self.docker_client.containers.get(container_name)
+                health = container.attrs.get('State', {}).get('Health', {}).get('Status', 'running')
+                if container.status == "running" and health != "unhealthy":
+                    return True
+            except:
+                pass
+            time.sleep(2)
+        return False

@@ -1,0 +1,20 @@
+# Low-severity, well-known patterns (bypass LLM)
+rules:
+  - id: 302_redirect
+    pattern: "302"
+    severity: low
+    root_cause: "HTTP 302 Redirect detected."
+    suggested_fix: "Log noise, no action required."
+    auto_restart_safe: false
+  - id: connection_reset
+    pattern: "Connection reset by peer"
+    severity: medium
+    root_cause: "Ephemeral network glitch or client disconnect."
+    suggested_fix: "Check client-side timeout or transient network instability."
+    auto_restart_safe: true
+  - id: oom_kill
+    pattern: "Killed"
+    severity: high
+    root_cause: "Out of Memory (OOM) error."
+    suggested_fix: "Increase memory limit in docker-compose.yml."
+    auto_restart_safe: true

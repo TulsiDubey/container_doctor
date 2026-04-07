@@ -602,6 +602,11 @@
     </dialog>
 
     <script>
+        // Start live polling on load
+        window.addEventListener('load', () => {
+            updateGlobal();
+            setInterval(updateGlobal, 5000); 
+        });
         function switchTab(tabId, el) {
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -697,6 +702,8 @@
                                 <td><strong>${c.name}</strong></td>
                                 <td><span style="font-size:12px;color:var(--text-secondary)">${c.project}</span></td>
                                 <td><span class="status-dot ${sc}"></span>${c.status}</td>
+                                <td style="color:#60a5fa; font-weight:600">${c.cpu || '0%'}</td>
+                                <td style="color:#c084fc; font-weight:600">${c.ram || '0MB'}</td>
                                 <td>${diagBtn}</td>
                             </tr>`;
                             logOpts += `<option value="${c.name}">${c.name} [${ns.namespace}/${imageGroup.name}]</option>`;
@@ -706,7 +713,7 @@
                             <div class="project-group">
                                 <div class="project-header">Cluster project: ${imageGroup.name} <span class="project-badge">Linked: ${imageGroup.tracked ? 'Yes' : 'No'}</span></div>
                                 <div class="table-responsive"><table>
-                                    <thead><tr><th>Container ID</th><th>project Target</th><th>Daemon Status</th><th>Node Insight</th></tr></thead>
+                                    <thead><tr><th>Container Name</th><th>Project</th><th>Status</th><th>CPU (%)</th><th>RAM (MB)</th><th>Health Insight</th></tr></thead>
                                     <tbody>${containerRows}</tbody>
                                 </table></div>
                             </div>

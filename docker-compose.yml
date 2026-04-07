@@ -1,42 +1,116 @@
 services:
-  doctor_hub:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - GEMINI_API_KEY=AIzaSyCwuSsPomoqGACzm8t4HH_BgFOdd3KoI0Y
-      - TARGET_CONTAINERS=web,api,db
-      - CHECK_INTERVAL=3
-      - LOG_LINES=50
-      - AUTO_FIX=true
-      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
-      - MAX_DIAGNOSES_PER_HOUR=20
-      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
-      - SMTP_SERVER=${SMTP_SERVER:-}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_USER=${SMTP_USER:-}
-      - SMTP_PASS=${SMTP_PASS:-}
-      - SMTP_RECIPIENT=${SMTP_RECIPIENT:-}
+  # --- INFRASTRUCTURE ---
+
+  db:
+    image: pgvector/pgvector:pg15
+    container_name: db
     ports:
-      - "8080:8080"
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=tulsi1
+      - POSTGRES_PASSWORD=Tulsi@2211
+      - POSTGRES_DB=mydb
+    networks:
+      - doctor-net
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - doctor-net
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
     depends_on:
-      db:
-        condition: service_healthy
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - doctor-net
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
     networks:
       - doctor-net
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+
+  # --- MONITORING SERVICES ---
+
+  log_ingestor:
+    build:
+      context: .
+      dockerfile: services/log_ingestor/Dockerfile
+    container_name: log_ingestor
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - TARGET_CONTAINERS=web,api,db
+    depends_on:
+      - kafka
+    networks:
+      - doctor-net
+    restart: unless-stopped
+
+  incident_processor:
+    build:
+      context: .
+      dockerfile: services/incident_processor/Dockerfile
+    container_name: incident_processor
+    environment:
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
+      - GEMINI_API_KEY=AIzaSyCwuSsPomoqGACzm8t4HH_BgFOdd3KoI0Y
+      - OLLAMA_HOST=http://ollama:11434
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+    depends_on:
+      - db
+      - kafka
+      - ollama
+    networks:
+      - doctor-net
+    restart: unless-stopped
+
+  dashboard_api:
+    build:
+      context: .
+      dockerfile: services/dashboard_api/Dockerfile
+    container_name: dashboard_api
+    ports:
+      - "8080:8080"
+    environment:
+      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
+    depends_on:
+      - db
+    networks:
+      - doctor-net
+    restart: unless-stopped
+
+  # --- TEST APP SERVICES ---
 
   web:
     image: nginx:latest
@@ -45,6 +119,11 @@ services:
       - "80:80"
     networks:
       - doctor-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 5s
+      timeout: 2s
+      retries: 2
     restart: unless-stopped
 
   api:
@@ -64,32 +143,12 @@ services:
   tunnel:
     image: cloudflare/cloudflared:latest
     container_name: cloudflare_tunnel
-    command: tunnel --url http://doctor_hub:8080
+    command: tunnel --url http://dashboard_api:8080
     networks:
       - doctor-net
     restart: always
     depends_on:
-      - doctor_hub
-
-  db:
-    image: postgres:15
-    container_name: db
-    ports:
-      - "5433:5432"
-    environment:
-      - POSTGRES_USER=tulsi1
-      - POSTGRES_PASSWORD=Tulsi@2211
-      - POSTGRES_DB=mydb
-    networks:
-      - doctor-net
-    volumes:
-      - db_data:/var/lib/postgresql/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - dashboard_api
 
 networks:
   doctor-net:
@@ -97,3 +156,4 @@ networks:
 
 volumes:
   db_data:
+  ollama_data:
