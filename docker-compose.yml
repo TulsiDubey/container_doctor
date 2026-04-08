@@ -21,31 +21,39 @@ services:
       timeout: 5s
       retries: 5
 
-  zookeeper:
-    image: confluentinc/cp-zookeeper:latest
-    container_name: zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    networks:
-      - doctor-net
-
   kafka:
     image: confluentinc/cp-kafka:latest
     container_name: kafka
-    depends_on:
-      - zookeeper
     ports:
       - "9092:9092"
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_LISTENERS: 'PLAINTEXT://kafka:29092,CONTROLLER://kafka:9093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      # Simple Base64 ID for KRaft
+      CLUSTER_ID: 'MkU3RTFDRUI3QzY0NEZGM0'
     networks:
       - doctor-net
+    healthcheck:
+      # Use native Kafka tool and relax timing for first-boot latency
+      test: ["CMD-SHELL", "/usr/bin/kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.50'
 
   ollama:
     image: ollama/ollama:latest
@@ -57,6 +65,11 @@ services:
     networks:
       - doctor-net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
 
   # --- MONITORING SERVICES ---
 
@@ -71,10 +84,16 @@ services:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - TARGET_CONTAINERS=web,api,db
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     networks:
       - doctor-net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.25'
 
   incident_processor:
     build:
@@ -83,8 +102,8 @@ services:
     container_name: incident_processor
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
-      - GEMINI_API_KEY=AIzaSyCwuSsPomoqGACzm8t4HH_BgFOdd3KoI0Y
+      - DATABASE_URL=postgresql://tulsi1:Tulsi%402211@db:5432/mydb
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - OLLAMA_HOST=http://ollama:11434
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
     depends_on:
@@ -93,7 +112,14 @@ services:
       - ollama
     networks:
       - doctor-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.50'
 
   dashboard_api:
     build:
@@ -103,12 +129,19 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
+      - DATABASE_URL=postgresql://tulsi1:Tulsi%402211@db:5432/mydb
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - db
     networks:
       - doctor-net
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.25'
 
   # --- TEST APP SERVICES ---
 
@@ -132,7 +165,7 @@ services:
     ports:
       - "5000:5000"
     environment:
-      - DATABASE_URL=postgres://tulsi1:Tulsi%402211@db:5432/mydb
+      - DATABASE_URL=postgresql://tulsi1:Tulsi%402211@db:5432/mydb
       - POOL_SIZE=20
     depends_on:
       - db

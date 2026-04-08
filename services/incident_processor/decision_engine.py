@@ -4,7 +4,20 @@ from shared.db import SessionLocal, Event
 
 class DecisionEngine:
     def __init__(self):
-        self.docker_client = docker.from_env()
+        # Resilience: Retry connection to the Docker Engine socket
+        self.docker_client = None
+        for i in range(5):
+            try:
+                self.docker_client = docker.from_env()
+                self.docker_client.version()
+                break
+            except Exception as e:
+                print(f"Waiting for Docker Socket (Attempt {i+1}/5): {e}")
+                time.sleep(2)
+        
+        if not self.docker_client:
+            print("CRITICAL: Could not connect to Docker Socket. Diagnostics will be degraded.")
+
         self.safety_rules = {
             "max_restarts_per_hour": 3,
             "min_confidence": 75,

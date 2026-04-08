@@ -1,5 +1,6 @@
-psycopg2-binary
 sqlalchemy
 pgvector
-pydantic
-python-dotenv
+psycopg2-binary
+sentence-transformers
+PyJWT
+docker

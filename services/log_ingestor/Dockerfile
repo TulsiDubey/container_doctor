@@ -2,11 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    gcc \
-    python3-dev \
-    librdkafka-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Removed apt-get block to bypass unstable network dependencies.
+# Using binary wheels for confluent-kafka and docker SDK.
 
 COPY services/log_ingestor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

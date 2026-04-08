@@ -2,14 +2,8 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install build deps for confluent-kafka and sentence-transformers
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    cmake \
-    python3-dev \
-    librdkafka-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Removed apt-get block to bypass unstable network dependencies. 
+# Using binary wheels for confluent-kafka and sentence-transformers.
 
 COPY services/incident_processor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

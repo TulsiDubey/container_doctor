@@ -107,47 +107,52 @@
                 <label for="password">Access Token / Password</label>
                 <input type="password" id="password" placeholder="••••••••" required>
             </div>
-            <button type="submit" id="submitBtn">Verify Identity</button>
+            <button type="submit" id="login-btn">Access Dashboard</button>
         </form>
     </div>
 
     <script>
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+        document.getElementById('loginForm').addEventListener('submit', performLogin);
+
+        async function performLogin(e) {
             e.preventDefault();
-            const btn = document.getElementById('submitBtn');
-            const errorBox = document.getElementById('error-box');
-            
+            const un = document.getElementById('username').value;
+            const pw = document.getElementById('password').value;
+            const btn = document.getElementById('login-btn');
+            const error = document.getElementById('error-box');
+
             btn.disabled = true;
-            btn.innerText = "Verifying with Registry...";
-            errorBox.style.display = "none";
+            btn.innerText = "Authenticating Hub...";
+            error.style.display = 'none';
 
             try {
+                console.log("Attempting Hub Auth for:", un);
                 const res = await fetch('/api/login', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        username: document.getElementById('username').value,
-                        password: document.getElementById('password').value
-                    })
+                    body: JSON.stringify({ username: un, password: pw })
                 });
-
                 const data = await res.json();
-                
-                if (data.success) {
+
+                if (data.success && data.token) {
+                    console.log("Auth SUCCESS. Transitioning to Cluster Dashboard...");
+                    // SECURE STORAGE: Phase 4 Identity
+                    localStorage.setItem('doctor_token', data.token);
                     window.location.href = "/";
                 } else {
-                    errorBox.innerText = data.error || "Authentication failed.";
-                    errorBox.style.display = "block";
+                    error.innerText = data.message || "Invalid cluster credentials";
+                    error.style.display = 'block';
                     btn.disabled = false;
-                    btn.innerText = "Verify Identity";
+                    btn.innerText = "Access Dashboard";
                 }
             } catch (err) {
-                errorBox.innerText = "Network error communicating with the agent framework.";
-                errorBox.style.display = "block";
+                console.error("Auth Exception:", err);
+                error.innerText = "Hub connection failed. Verify daemon status.";
+                error.style.display = 'block';
                 btn.disabled = false;
-                btn.innerText = "Verify Identity";
+                btn.innerText = "Access Dashboard";
             }
-        });
+        }
     </script>
 </body>
 </html>

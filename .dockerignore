@@ -1,0 +1,14 @@
+.git
+venv
+.venv
+__pycache__
+*.log
+*.pyc
+*.pyo
+*.pyd
+.db
+db_data/
+ollama_data/
+.env
+.gemini
+/home/tulsi/.gemini/antigravity/brain/

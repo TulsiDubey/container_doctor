@@ -18,3 +18,9 @@ rules:
     root_cause: "Out of Memory (OOM) error."
     suggested_fix: "Increase memory limit in docker-compose.yml."
     auto_restart_safe: true
+  - id: manual_stop
+    pattern: "SYSTEM_HEAL"
+    severity: medium
+    root_cause: "Container is not in a running state (possible manual stop or unmanaged exit)."
+    suggested_fix: "Restart the container manually or verify the reason for termination."
+    auto_restart_safe: true

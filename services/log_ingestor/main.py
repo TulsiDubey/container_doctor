@@ -39,11 +39,11 @@ def stream_container_logs(container_name, producer):
             if not log_line:
                 continue
                 
-            # Metadata injection
+            # Metadata injection (Phase 5: Pure Local Sourcing)
             payload = {
                 "container": container_name,
                 "project": container.labels.get('com.docker.compose.project', 'standalone'),
-                "namespace": list(container.attrs.get('NetworkSettings', {}).get('Networks', {}).keys())[0] if container.attrs.get('NetworkSettings', {}).get('Networks') else "default",
+                "project_cluster": list(container.attrs.get('NetworkSettings', {}).get('Networks', {}).keys())[0] if container.attrs.get('NetworkSettings', {}).get('Networks') else "default",
                 "log": log_line,
                 "timestamp": datetime.utcnow().isoformat()
             }
@@ -89,11 +89,25 @@ def stream_container_stats(container_name, producer):
                     num_cpus = len(percpu) if percpu else 1
                     cpu_percent = (cpu_delta / system_delta) * num_cpus * 100.0
 
+                # Disk I/O Extraction (Phase 6)
+                blkio = stats.get('blkio_stats', {})
+                disk_read = 0
+                disk_write = 0
+                
+                # Service types: Read (1/0), Write (1/0) - aggregating across all devices
+                for entry in blkio.get('io_service_bytes_recursive', []):
+                    if entry.get('op') == 'Read':
+                        disk_read += entry.get('value', 0)
+                    elif entry.get('op') == 'Write':
+                        disk_write += entry.get('value', 0)
+
                 payload = {
                     "container": container_name,
                     "cpu_percent": round(cpu_percent, 2),
                     "mem_usage_mb": round(mem_stats.get('usage', 0) / (1024 * 1024), 2),
                     "mem_limit_mb": round(mem_stats.get('limit', 1) / (1024 * 1024), 2),
+                    "disk_read_mb": round(disk_read / (1024 * 1024), 2),
+                    "disk_write_mb": round(disk_write / (1024 * 1024), 2),
                     "timestamp": datetime.utcnow().isoformat()
                 }
                 
@@ -115,30 +129,61 @@ def stream_container_stats(container_name, producer):
         stream_container_stats(container_name, producer)
 
 def main():
-    print("Log Ingestor Service Starting...")
-    producer = get_kafka_producer()
+    print("Log Ingestor Service Starting (Stability Shield: ON)...")
     
-    threads = []
-    for name in TARGET_CONTAINERS:
-        name = name.strip()
-        if not name:
-            continue
-        # Logs thread
-        tl = threading.Thread(target=stream_container_logs, args=(name, producer), daemon=True)
-        tl.start()
-        threads.append(tl)
+    while True:
+        try:
+            producer = get_kafka_consumer_producer()
+            
+            threads = []
+            for name in TARGET_CONTAINERS:
+                name = name.strip()
+                if not name:
+                    continue
+                # Logs thread
+                tl = threading.Thread(target=stream_container_logs, args=(name, producer), daemon=True)
+                tl.start()
+                threads.append(tl)
 
-        # Metrics thread
-        tm = threading.Thread(target=stream_container_stats, args=(name, producer), daemon=True)
-        tm.start()
-        threads.append(tm)
-        
-    try:
-        while True:
-            producer.flush()
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("Shutting down...")
+                # Metrics thread
+                tm = threading.Thread(target=stream_container_stats, args=(name, producer), daemon=True)
+                tm.start()
+                threads.append(tm)
+                
+            # Phase 7: Proactive Health Heartbeat Loop
+            client = docker.from_env()
+            while True:
+                # Detects containers that are silent/stopped and triggers AI analysis
+                for name in TARGET_CONTAINERS:
+                    name = name.strip()
+                    if not name: continue
+                    
+                    try:
+                        c = client.containers.get(name)
+                        if c.status != "running":
+                            print(f"⚠️ [HEARTBEAT] Detected DOWN node: {name}. Triggering AI Diagnostic...")
+                            payload = {
+                                "container": name,
+                                "project": c.labels.get('com.docker.compose.project', 'standalone'),
+                                "log": f"[SYSTEM_HEAL] Container state changed to: {c.status}",
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                            producer.produce(KAFKA_TOPIC_LOGS, key=name, value=json.dumps(payload))
+                    except Exception as e:
+                        print(f"Heartbeat error for {name}: {e}")
+
+                producer.flush()
+                time.sleep(10) # 10s health check interval
+        except Exception as e:
+            print(f"Ingestor Core Error: {e}. Reconnecting in 10s...")
+            time.sleep(10)
+        except KeyboardInterrupt:
+            print("Shutting down...")
+            break
+
+def get_kafka_consumer_producer():
+    # Helper to ensure we have a working producer
+    return get_kafka_producer()
 
 if __name__ == "__main__":
     main()

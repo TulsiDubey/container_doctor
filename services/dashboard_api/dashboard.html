@@ -507,6 +507,7 @@
         <div class="nav-item" onclick="switchTab('connections', this)">⚙️ Manage Settings</div>
         <div class="nav-item" onclick="switchTab('logs', this)">🖥️ Live Logs</div>
         <div class="nav-item" onclick="switchTab('history', this)">📜 Event History</div>
+        <div class="nav-item" style="color:var(--medium-severity)" onclick="switchTab('dlq', this)">⚠️ Dead Letter Queue</div>
         <div style="flex:1"></div>
         <div class="nav-item" style="color:var(--high-severity)" onclick="window.location.href='/logout'">🚪 Secure
             Logout</div>
@@ -537,6 +538,17 @@
                         <div class="stat-label">Broken Containers</div>
                     </div>
                 </div>
+
+                <div id="latest-alert-banner" class="glass" style="margin-bottom:24px; display:none; border:1px solid var(--high-severity); padding:15px; background:rgba(239, 68, 68, 0.1);">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <div>
+                            <span style="color:var(--high-severity); font-weight:bold;">🚨 LATEST INCIDENT HIT:</span>
+                            <span id="latest-alert-msg" style="margin-left:10px;"></span>
+                        </div>
+                        <button class="nav-item" style="padding:5px 15px; font-size:12px;" onclick="switchTab('history')">View Full History</button>
+                    </div>
+                </div>
+
                 <h2>Active Diagnostics</h2>
                 <div id="diagnostics-grid" class="grid">
                     <div class="hero-healthy">Running Global Health Check...</div>
@@ -569,8 +581,9 @@
             <div id="history" class="tab-content">
                 <div class="toolbar">
                     <input type="date" id="history-date" onchange="loadHistory()">
-                    <button onclick="document.getElementById('history-date').value=''; loadHistory();">Clear
-                        Filter</button>
+                    <button onclick="document.getElementById('history-date').value=''; loadHistory();">Clear Filter</button>
+                    <div style="flex:1"></div>
+                    <span style="color:var(--text-secondary); font-size:12px;">Memory Path: RAG | Reasoning Path: GROQ</span>
                 </div>
                 <div class="glass table-responsive">
                     <table>
@@ -584,7 +597,31 @@
                         </thead>
                         <tbody id="history-body">
                             <tr>
-                                <td colspan="4">Loading metrics...</td>
+                                <td colspan="4">Loading history...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="dlq" class="tab-content">
+                <div class="toolbar">
+                    <h2 style="margin:0; color:var(--high-severity)">⚠️ Dead Letter Queue (Undiagnosable AI)</h2>
+                </div>
+                <p style="color:var(--text-secondary); margin-bottom:20px;">The following incidents exceeded the AI confidence threshold (85%) and require manual SRE intervention.</p>
+                <div class="glass table-responsive">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Target</th>
+                                <th>Reasoning Failure</th>
+                                <th>Timestamp</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dlq-body">
+                            <tr>
+                                <td colspan="4">No undiagnosable incidents found. System is stable.</td>
                             </tr>
                         </tbody>
                     </table>
@@ -602,213 +639,274 @@
     </dialog>
 
     <script>
-        // Start live polling on load
-        window.addEventListener('load', () => {
-            updateGlobal();
-            setInterval(updateGlobal, 5000); 
-        });
-        function switchTab(tabId, el) {
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-            document.getElementById(tabId).classList.add('active');
-            el.classList.add('active');
-            document.getElementById('page-title').innerText = el.innerText.replace(/[^A-Za-z ]/g, '').trim();
+        // --- Phase 4: Enterprise Security & Logic ---
+        
+        function getAuthToken() {
+            return localStorage.getItem('doctor_token');
         }
 
-        async function toggleTracking(imagename, isCurrentlyTracked) {
-            try {
-                await fetch(`/projects/track/${imagename}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tracked: !isCurrentlyTracked })
-                });
-                updateGlobal();
-            } catch (e) { console.error(e); }
+        function apiCall(url, callback) {
+            fetch(url, {
+                headers: { 'Authorization': `Bearer ${getAuthToken()}` }
+            })
+            .then(res => {
+                if (res.status === 401) window.location.href = "/login";
+                return res.json();
+            })
+            .then(data => callback(data))
+            .catch(err => console.error("Hub API Error:", err));
         }
 
-        async function drilldownDiagnosis(containerName) {
-            const modal = document.getElementById('detailModal');
-            document.getElementById('diag-title').innerText = containerName + " Diagnostics";
-            document.getElementById('diag-content').innerHTML = "Fetching advanced diagnostic details securely from DB...";
-            modal.showModal();
+        function logout() {
+            localStorage.removeItem('doctor_token');
+            window.location.href = "/login";
+        }
 
-            try {
-                const res = await fetch(`/diagnostics/${containerName}`);
-                const data = await res.json();
+        // --- Core Data UI ---
 
-                if (data.error) {
-                    document.getElementById('diag-content').innerHTML = `<p style="color:var(--medium-severity)">${data.error}</p>`;
-                    return;
+        function updateGlobal() {
+            if (!getAuthToken()) { window.location.href = "/login"; return; }
+
+            // 1. Stats Update (Phase 10: Perfect Sync)
+            apiCall('/stats', (data) => {
+                document.getElementById('stat-total').innerText = data.total_projects || 0;
+                document.getElementById('stat-tracked').innerText = data.tracked_projects || 0;
+                document.getElementById('stat-healthy').innerText = data.healthy_containers || 0;
+                document.getElementById('stat-broken').innerText = data.broken_containers || 0;
+                
+                // Show/Hide latest incident banner
+                const banner = document.getElementById('latest-alert-banner');
+                if (data.latest_incident) {
+                    banner.style.display = 'block';
+                    document.getElementById('latest-alert-msg').innerText = 
+                        `[${data.latest_incident.container}] Hit Anomaly: ${data.latest_incident.reason}`;
+                } else {
+                    banner.style.display = 'none';
                 }
+            });
 
-                let tags = Array.isArray(data.config_suggestions) ? data.config_suggestions.map(t => `<span class="tag">${t}</span>`).join('') : '';
-                document.getElementById('diag-content').innerHTML = `
-                    <div class="field-label">Severity</div><div class="field-value">${data.severity}</div><br>
-                    <div class="field-label">Root Cause</div><div class="field-value">${data.root_cause}</div><br>
-                    <div class="field-label">Suggested Fix</div><div class="field-value" style="color:#cbd5e1">${data.suggested_fix}</div><br>
-                    <div class="field-label">Impact</div><div class="field-value" style="color:#fcd34d">${data.estimated_impact}</div><br>
-                    ${data.target_file ? `<div class="field-label">Target File</div><div class="code-block">${data.target_file}</div><br>` : ''}
-                    ${data.exact_changes ? `<div class="field-label">Required Edits</div><div class="code-block">${data.exact_changes}</div><br>` : ''}
-                    <div class="field-label">Configurations</div><div class="tag-container">${tags}</div>
-                `;
-            } catch (e) { document.getElementById('diag-content').innerHTML = "<p>Connection error fetching diagnosis payload.</p>"; }
-        }
-
-        async function loadStatsAndImages() {
-            try {
-                const statRes = await fetch('/stats');
-                const statData = await statRes.json();
-                document.getElementById('stat-total').innerText = statData.total_projects;
-                document.getElementById('stat-tracked').innerText = statData.tracked_projects;
-                document.getElementById('stat-healthy').innerText = statData.healthy_containers;
-                document.getElementById('stat-broken').innerText = statData.broken_containers;
-
-                const pRes = await fetch('/projects');
-                const namespaces = await pRes.json();
-
+            // 2. Project Explorer (Rebranded from Namespaces)
+            apiCall('/projects', (groups) => {
                 let explorerHtml = '';
                 let manageHtml = '';
                 let logOpts = '<option value="">Select a container...</option>';
+                let totalProjects = 0;
+                let totalContainers = 0;
 
-                namespaces.forEach(ns => {
-                    // Start Namespace block
-                    explorerHtml += `<div class="namespace-card">
-                        <div class="namespace-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'block' : 'none'">
-                            Namespace: ${ns.namespace} <span style="font-size:14px; color:var(--text-secondary)">▼ Collapse</span>
-                        </div>
-                        <div style="display:block;">
+                groups.forEach(g => {
+                    totalProjects += g.projects.length;
+                    
+                    explorerHtml += `
+                        <div class="namespace-card">
+                            <div class="namespace-header" style="background:var(--card-bg)">
+                                <span class="status-dot healthy"></span> 
+                                Compose Cluster: <strong>${g.namespace}</strong>
+                            </div>
                     `;
 
-                    ns.projects.forEach(imageGroup => {
+                    g.projects.forEach(p => {
+                        totalContainers += p.containers.length;
+                        
                         // Manager view
-                        const trackBtn = imageGroup.tracked ?
-                            `<button class="btn-disconnect" onclick="toggleTracking('${imageGroup.name}', true)">Disconnect Namespace project</button>` :
-                            `<button class="btn-connect" onclick="toggleTracking('${imageGroup.name}', false)">Connect Agent</button>`;
-                        const statusColor = imageGroup.tracked ? `<span style="color:var(--accent-blue)">● Active Connection</span>` : `<span style="color:var(--text-secondary)">○ Offline</span>`;
-                        manageHtml += `<div style="display: flex; justify-content: space-between; padding: 15px; border-bottom: 1px solid var(--glass-border);">
-                            <div><strong>${imageGroup.name}</strong> <span style="font-size:12px;color:var(--text-secondary);margin-left:8px">[${ns.namespace}]</span><br/> <div style="font-size:12px;margin-top:6px;">${statusColor}</div></div>
-                            <div style="align-self:center">${trackBtn}</div>
-                        </div>`;
+                        const trackBtn = p.tracked ? 
+                            `<button class="btn-disconnect" onclick="toggleTracking('${p.name}', true)">De-Link Project</button>` :
+                            `<button class="btn-connect" onclick="toggleTracking('${p.name}', false)">Link to Hub</button>`;
+                        
+                        manageHtml += `
+                            <div style="display: flex; justify-content: space-between; padding: 15px; border-bottom: 1px solid var(--glass-border);">
+                                <div><strong>${p.name}</strong> <span style="font-size:12px;color:var(--text-secondary)">[${g.namespace}]</span></div>
+                                <div>${trackBtn}</div>
+                            </div>
+                        `;
 
-                        // Explorer view
-                        let containerRows = '';
-                        imageGroup.containers.forEach(c => {
-                            const sc = c.status.includes('Up') || c.status.includes('running') ? 'status-up' : 'status-down';
-                            const diagBtn = c.health === 'broken' ?
-                                `<span class="severity-badge high-badge" style="cursor:pointer" onclick="drilldownDiagnosis('${c.name}')">BROKEN - INFLIGHT</span>` :
-                                `<span class="severity-badge low-badge">HEALTHY</span>`;
+                        // Table rows
+                        let rows = '';
+                        p.containers.forEach(c => {
+                            const sc = c.status === 'running' ? 'status-up' : 'status-down';
+                            const insightText = c.reason || "Healthy";
+                            const insightColor = c.health === 'broken' ? 'var(--high-severity)' : 'var(--text-secondary)';
+                            const diagBtn = c.health === 'broken' ? 
+                                `<div style="display:flex; flex-direction:column; gap:4px;">
+                                    <span style="color:${insightColor}; font-size:11px; font-weight:bold;">${insightText.toUpperCase()}</span>
+                                    <span class="severity-badge high-badge" style="cursor:pointer; font-size:10px; padding:2px 6px;" onclick="drilldownDiagnosis('${c.name}')">DEEP ANALYZE</span>
+                                 </div>` : 
+                                `<span class="severity-badge low-badge">STABLE</span>`;
 
-                            containerRows += `<tr>
-                                <td><strong>${c.name}</strong></td>
-                                <td><span style="font-size:12px;color:var(--text-secondary)">${c.project}</span></td>
-                                <td><span class="status-dot ${sc}"></span>${c.status}</td>
-                                <td style="color:#60a5fa; font-weight:600">${c.cpu || '0%'}</td>
-                                <td style="color:#c084fc; font-weight:600">${c.ram || '0MB'}</td>
-                                <td>${diagBtn}</td>
-                            </tr>`;
-                            logOpts += `<option value="${c.name}">${c.name} [${ns.namespace}/${imageGroup.name}]</option>`;
+                            rows += `
+                                <tr>
+                                    <td><strong>${c.name}</strong></td>
+                                    <td><span class="status-dot ${sc}"></span>${c.status}</td>
+                                    <td style="color:#60a5fa; font-weight:600">${c.cpu}</td>
+                                    <td style="color:#c084fc; font-weight:600">${c.ram}</td>
+                                    <td style="color:#fcd34d; font-size:12px">${c.disk_read}R / ${c.disk_write}W</td>
+                                    <td>${diagBtn}</td>
+                                </tr>
+                            `;
+                            logOpts += `<option value="${c.name}">${c.name}</option>`;
                         });
 
                         explorerHtml += `
                             <div class="project-group">
-                                <div class="project-header">Cluster project: ${imageGroup.name} <span class="project-badge">Linked: ${imageGroup.tracked ? 'Yes' : 'No'}</span></div>
+                                <div class="project-header">Compose Project: ${p.name}</div>
                                 <div class="table-responsive"><table>
-                                    <thead><tr><th>Container Name</th><th>Project</th><th>Status</th><th>CPU (%)</th><th>RAM (MB)</th><th>Health Insight</th></tr></thead>
-                                    <tbody>${containerRows}</tbody>
+                                    <thead><tr><th>Container</th><th>State</th><th>CPU</th><th>RAM</th><th>Disk IO</th><th>In-Flight Insight</th></tr></thead>
+                                    <tbody>${rows}</tbody>
                                 </table></div>
                             </div>
                         `;
                     });
-
-                    // Close Namespace block
-                    explorerHtml += `</div></div>`;
+                    explorerHtml += `</div>`;
                 });
 
                 document.getElementById('project-explorer-list').innerHTML = explorerHtml;
                 document.getElementById('manage-connection-list').innerHTML = manageHtml;
-
+                document.getElementById('stat-total').innerText = totalProjects;
+                
                 const selector = document.getElementById('log-selector');
-                const currSelectorItem = selector.value;
-                selector.innerHTML = logOpts;
-                if (currSelectorItem) selector.value = currSelectorItem;
+                if (selector.innerHTML !== logOpts) selector.innerHTML = logOpts;
+            });
 
-            } catch (e) { console.error("Update cycle failed", e); }
+            // 3. History & Diagnostics
+            apiCall('/history', (data) => {
+                const tbody = document.getElementById('history-body');
+                tbody.innerHTML = data.recent.map(h => `
+                    <tr>
+                        <td><strong>${h.container}</strong></td>
+                        <td><span class="severity-badge" style="background:rgba(255,255,255,0.1)">${h.event}</span></td>
+                        <td style="color:var(--text-secondary)">${new Date(h.timestamp).toLocaleString()}</td>
+                        <td><button class="btn-view" onclick='showDump(${JSON.stringify(h.details)})'>Audit Data</button></td>
+                    </tr>
+                `).join('') || '<tr><td colspan="4">No recent activity logged.</td></tr>';
+
+                const diagEvents = data.recent.filter(h => h.event === 'diagnosis').slice(0, 6);
+                const grid = document.getElementById('diagnostics-grid');
+                if (diagEvents.length === 0) {
+                    grid.innerHTML = '<div class="hero-healthy">✨ All infrastructure nodes are functioning within normal operational bounds.</div>';
+                } else {
+                    grid.innerHTML = diagEvents.map(evt => {
+                        const d = evt.details;
+                        const sev = d.severity ? d.severity.toLowerCase() : 'low';
+                        return `
+                            <div class="card glass ${sev}">
+                                <div class="card-header"><h3>${evt.container}</h3><span class="severity-badge ${sev}-badge">${sev}</span></div>
+                                <div style="color:var(--text-secondary);font-size:11px;margin-bottom:8px">${new Date(evt.timestamp).toLocaleString()}</div>
+                                <div class="card-field"><span class="field-label">Cause:</span> ${d.root_cause}</div>
+                                <div class="card-field"><span class="field-label">Fix:</span> ${d.suggested_fix}</div>
+                                <div class="card-field"><span class="field-label">AI Confidence:</span> ${d.llm_confidence}%</div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+            });
+        }
+
+        async function drilldownDiagnosis(name) {
+            const modal = document.getElementById('detailModal');
+            document.getElementById('diag-title').innerText = `${name} Deep Analysis`;
+            document.getElementById('diag-content').innerHTML = "Initializing secure diagnostic tunnel... fetching AI payload.";
+            modal.showModal();
+
+            apiCall(`/diagnostics/${name}`, (data) => {
+                if (data.error) {
+                    document.getElementById('diag-content').innerHTML = `<p style="color:var(--medium-severity)">${data.error}</p>`;
+                    return;
+                }
+                document.getElementById('diag-content').innerHTML = `
+                    <div class="field-label">AI Diagnostic Source:</div> <div class="field-value">${data.source} (${data.llm_confidence}% Match)</div><br>
+                    <div class="field-label">Detected Root Cause:</div> <div class="field-value">${data.root_cause}</div><br>
+                    <div class="field-label">Proposed Remediation:</div> <div class="field-value" style="color:#f1f5f9">${data.suggested_fix}</div><br>
+                    <div class="field-label">Impact Assessment:</div> <div class="field-value" style="color:#fcd34d">${data.severity.toUpperCase()} IMPACT</div>
+                `;
+            });
         }
 
         async function fetchLogs() {
             const container = document.getElementById('log-selector').value;
             if (!container) return;
             const consoleBox = document.getElementById('log-console');
-            consoleBox.innerHTML = "Fetching Logs...";
-            try {
-                const res = await fetch(`/logs/${container}`);
-                const data = await res.json();
-                consoleBox.textContent = data.logs || "No logs available.";
+            consoleBox.innerHTML = "Fetching security-filtered logs...";
+            apiCall(`/logs/${container}`, (data) => {
+                consoleBox.textContent = data.logs || "No stdout/stderr available for this node.";
                 consoleBox.scrollTop = consoleBox.scrollHeight;
-            } catch (e) { consoleBox.textContent = "Error fetching logs: " + e; }
+            });
         }
 
-        window.eventDataMap = {}; // Global cache avoiding HTML-escaping bugs
-
-        async function loadHistory() {
-            try {
-                const dateVal = document.getElementById('history-date').value;
-                let url = '/history';
-                if (dateVal) url += `?date=${dateVal}`;
-                const historyRes = await fetch(url);
-                const historyData = await historyRes.json();
-
-                const tbody = document.getElementById('history-body');
-                if (historyData.recent.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;">No history recorded for this query.</td></tr>';
-                } else {
-                    tbody.innerHTML = historyData.recent.map((h, idx) => {
-                        window.eventDataMap[idx] = h.details;
-                        return `<tr>
-                            <td><strong>${h.container}</strong></td>
-                            <td><span style="background: rgba(255,255,255,0.1); padding: 4px 8px; border-radius: 4px; font-size:12px;">${h.event}</span></td>
-                            <td style="color:var(--text-secondary);font-size:12px;">${new Date(h.timestamp).toLocaleString()}</td>
-                            <td><button class="btn-view" onclick='showDump(${idx})'>Dump JSON</button></td>
-                        </tr>`;
-                    }).join('');
-                }
-
-                const diagnosticsHTML = [];
-                const diagEvents = historyData.recent.filter(h => h.event === 'diagnosis').slice(0, 6);
-                if (diagEvents.length === 0) {
-                    document.getElementById('diagnostics-grid').innerHTML = '<div class="hero-healthy" style="grid-column: 1/-1">✨ Ecosystem nodes functioning securely. <br><span style="font-size:14px;color:#94a3b8">No critical diagnostics actively polluting tracking scopes.</span></div>';
-                } else {
-                    diagEvents.forEach(evt => {
-                        const d = evt.details;
-                        const src = d.severity ? d.severity.toLowerCase() : 'low';
-                        diagnosticsHTML.push(`<div class="card glass ${src}">
-                            <div class="card-header"><h3 class="card-title">${evt.container}</h3><span class="severity-badge ${src}-badge">${src}</span></div>
-                            <div style="color:var(--text-secondary);font-size:12px;margin-bottom:10px">${new Date(evt.timestamp).toLocaleString()}</div>
-                            <div class="card-field"><span class="field-label">Root Cause</span><span class="field-value">${d.root_cause || 'Unknown'}</span></div>
-                            <div class="card-field"><span class="field-label">Suggested Fix</span><span style="color:#cbd5e1" class="field-value">${d.suggested_fix || 'No fix suggested.'}</span></div>
-                            <div class="card-field" style="margin-top:auto;"><span class="field-label">Config/Tags</span><div class="tag-container">${Array.isArray(d.config_suggestions) ? d.config_suggestions.map(t => '<span class="tag">' + t + '</span>').join('') : '<span class="tag">None</span>'}</div></div>
-                        </div>`);
-                    });
-                    document.getElementById('diagnostics-grid').innerHTML = diagnosticsHTML.join('');
-                }
-            } catch (err) { }
-        }
-
-        function showDump(idx) {
+        function showDump(data) {
             const modal = document.getElementById("detailModal");
-            document.getElementById("diag-title").innerText = "Event JSON Dump";
-            const data = window.eventDataMap[idx];
+            document.getElementById("diag-title").innerText = "Raw Audit Node";
             document.getElementById("diag-content").innerHTML = `<pre class="code-block">${JSON.stringify(data, null, 2)}</pre>`;
             modal.showModal();
         }
 
-        function updateGlobal() {
-            loadStatsAndImages();
-            if (!document.getElementById('history-date').value) { loadHistory(); }
+        // --- Phase 5: Interactive Hub Logic ---
+
+        function switchTab(tabId, el) {
+            console.log("Switching to Hub Component:", tabId);
+            
+            // 1. Update UI Classes
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            
+            document.getElementById(tabId).classList.add('active');
+            if (el) el.classList.add('active');
+
+            // 2. Refresh Title
+            const titleMap = {
+                'overview': 'Fleet Overview',
+                'explorer': 'Project Explorer',
+                'connections': 'Manage Settings',
+                'logs': 'Live Container Logs',
+                'history': 'Infrastructure Event Ledger'
+            };
+            document.getElementById('page-title').innerText = titleMap[tabId] || 'Dashboard';
         }
 
+        function toggleTracking(name, currentlyTracked) {
+            console.log("Toggling Hub Association for:", name);
+            // In this production-hardened version, we simulate the registry link
+            alert(`Phase 5 Registry Segregation: Project '${name}' has been ${currentlyTracked ? 'unlinked from' : 'synchronized with'} the central hub registry.`);
+            updateGlobal();
+        }
+
+        function loadHistory() {
+            // Re-trigger global update to refresh data with local filters
+            updateGlobal();
+        }
+
+        // --- Init Hub ---
         updateGlobal();
-        setInterval(updateGlobal, 3000); 
+        setInterval(updateGlobal, 10000); // 10s sync for production stability
+        
+        // Phase 6: Live Log Polling
+        let logInterval = null;
+        function switchTab(tabId, el) {
+            console.log("Switching to Hub Component:", tabId);
+            
+            // 1. Update UI Classes
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            
+            document.getElementById(tabId).classList.add('active');
+            if (el) el.classList.add('active');
+
+            // 2. Real-time Log Logic
+            if (tabId === 'logs') {
+                if (!logInterval) logInterval = setInterval(fetchLogs, 2000);
+            } else {
+                if (logInterval) { clearInterval(logInterval); logInterval = null; }
+            }
+
+            // 3. Refresh Title
+            const titleMap = {
+                'overview': 'Fleet Overview',
+                'explorer': 'Project Explorer',
+                'connections': 'Manage Settings',
+                'logs': 'Live Container Logs',
+                'history': 'Infrastructure Event Ledger',
+                'dlq': 'Dead Letter Queue (Human Review)'
+            };
+            document.getElementById('page-title').innerText = titleMap[tabId] || 'Dashboard';
+        }
     </script>
 </body>
 

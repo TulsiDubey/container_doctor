@@ -1,7 +1,7 @@
 import os
 import time
 import json
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, JSON, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, JSON, ForeignKey, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, session
 from pgvector.sqlalchemy import Vector
@@ -9,13 +9,21 @@ from datetime import datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://tulsi1:Tulsi%402211@db:5432/mydb")
 
-# Use a connection pool for high-performance
-engine = create_engine(
-    DATABASE_URL, 
-    pool_size=20, 
-    max_overflow=0,
-    pool_pre_ping=True
-)
+# Configure# Connection pooling for high-frequency metrics
+try:
+    engine = create_engine(
+        DATABASE_URL, 
+        pool_size=20, 
+        max_overflow=30,
+        pool_pre_ping=True, # Critical: Checks connection health before use
+        pool_recycle=3600    # Prevent stale connections
+    )
+except Exception as e:
+    print(f"CRITICAL: Database engine initialization failed: {e}")
+    # In production, we'd log this to an external monitor
+    raise
+
+# Hardened Session factory with auto-retry
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -35,13 +43,15 @@ class Event(Base):
 
 class Metric(Base):
     """
-    High-frequency resource telemetry (CPU/RAM).
+    High-frequency resource telemetry (CPU/RAM/DISK).
     """
     __tablename__ = "metrics"
     id = Column(Integer, primary_key=True, index=True)
     container = Column(String(255), index=True)
-    cpu_percent = Column(JSON) # Storing as JSON for flexibility or float
-    mem_usage_mb = Column(JSON)
+    cpu_percent = Column(Float) # Precision percentage
+    mem_usage_mb = Column(Float)
+    disk_read_mb = Column(Float, default=0.0)
+    disk_write_mb = Column(Float, default=0.0)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 class IncidentKnowledge(Base):

@@ -1,6 +1,13 @@
 #!/bin/bash
 # --- CONTAINER DOCTOR LOCAL DEV LAUNCHER ---
 
+# 🛡️ Reliability Watchdog: Kill orphaned microservices
+echo "🧹 Cleaning up existing services..."
+pkill -9 -f "python3 services/log_ingestor" || true
+pkill -9 -f "python3 services/incident_processor" || true
+pkill -9 -f "python3 services/dashboard_api" || true
+sleep 2
+
 export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 export DATABASE_URL=postgresql://tulsi1:Tulsi%402211@localhost:5433/mydb
 export OLLAMA_HOST=http://localhost:11434
