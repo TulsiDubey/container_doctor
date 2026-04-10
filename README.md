@@ -201,6 +201,20 @@ Refer to **[TEST_GUIDE.md](file:///home/tulsi/container-doctor/TEST_GUIDE.md)** 
 > [!TIP]
 > **Dashboard View**: Real-time project explorer with "In-Flight Insight" columns.
 > **Diagnostic View**: Deep analysis modal showing Groq-determined root cause and severity.
+Login
+<img width="579" height="505" alt="image" src="https://github.com/user-attachments/assets/0d6c4668-8797-4eed-8aa7-686de0a262e8" />
+Dashboard
+<img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/da05fb43-39a9-41e2-8a95-694b1a1d91b3" />
+Container-Overview
+<img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/55845920-9d01-4515-a07d-fbd85ea67da5" />
+De-Link Project
+<img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/5bb7e79d-938b-4940-97bb-4e9c517b58b5" />
+Live-logs
+<img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/34f71051-1af0-4169-890a-0df488086145" />
+Event-history and suggestions
+<img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/61d4d15b-ad89-4a57-a356-d1d10643663c" />
+
+
 
 ---
 
