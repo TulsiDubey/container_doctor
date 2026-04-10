@@ -2,7 +2,9 @@ import os
 import requests
 import smtplib
 from email.mime.text import MIMEText
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+IST = timezone(timedelta(hours=5, minutes=30))
+IST = timezone(timedelta(hours=5, minutes=30))
 
 class NotificationManager:
     """
@@ -28,7 +30,7 @@ class NotificationManager:
         # Deduplication & Cooldown check
         last_alert = self.alert_memory.get(container)
         if last_alert:
-            time_since = (datetime.utcnow() - last_alert["timestamp"])
+            time_since = (datetime.now(IST) - last_alert["timestamp"])
             is_same_cause = (last_alert["cause"] == root_cause)
             
             if is_same_cause and time_since < self.COOLDOWN_PERIOD:
@@ -51,7 +53,7 @@ class NotificationManager:
             except Exception as e:
                 print(f"Error sending Email alert: {e}")
 
-        self.alert_memory[container] = {"timestamp": datetime.utcnow(), "cause": root_cause}
+        self.alert_memory[container] = {"timestamp": datetime.now(IST), "cause": root_cause}
 
     def _send_email(self, container, severity, msg):
         email_msg = MIMEText(msg)

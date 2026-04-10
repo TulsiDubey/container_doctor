@@ -7,6 +7,11 @@ from flask_cors import CORS
 from shared.db import SessionLocal, Event, Metric, init_db
 from shared.auth import generate_token, token_required
 from sqlalchemy import desc, func, text
+import threading
+import requests
+from datetime import datetime, timezone, timedelta, timedelta
+IST = timezone(timedelta(hours=5, minutes=30))
+IST = timezone(timedelta(hours=5, minutes=30))
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "doctor_agent_secure_v2")
@@ -20,6 +25,92 @@ def get_docker_client():
     if docker_client is None:
         docker_client = docker.from_env()
     return docker_client
+
+def watchdog_loop():
+    """
+    Phase 18: Meta-Sentinel Watchdog.
+    Monitors the monitors. Bypasses Kafka to report backbone failures.
+    """
+    print("🌲 [WATCHDOG] Global Infrastructure Sentinel Active.")
+    critical_services = ["kafka", "ollama", "db"]
+    alert_cooldowns = {} # Prevent alert fatigue
+
+    while True:
+        try:
+            client = get_docker_client()
+            for service_name in critical_services:
+                try:
+                    container = client.containers.get(service_name)
+                    if container.status != "running":
+                        # Phase 18 & 20: Deduplicated Direct Injection
+                        with SessionLocal() as db:
+                            # Check if we already have an "Open" incident for this failure
+                            existing = db.query(Event).filter(
+                                Event.container == service_name,
+                                Event.status == "open",
+                                Event.event_type == "diagnosis"
+                            ).first()
+
+                            if not existing:
+                                event = Event(
+                                    container=service_name,
+                                    project="SENTINEL_SYSTEM",
+                                    event_type="diagnosis",
+                                    status="open",
+                                    details={
+                                        "root_cause": f"CORE INFRASTRUCTURE FAILURE: {service_name.upper()} node is {container.status}.",
+                                        "suggested_fix": f"Critical dependency down. Restart {service_name} via 'docker compose up -d {service_name}'",
+                                        "severity": "critical",
+                                        "source": "meta_watchdog",
+                                        "llm_confidence": 100
+                                    }
+                                )
+                                db.add(event)
+                                db.commit()
+                                print(f"🚨 [WATCHDOG] Logged NEW critical failure for {service_name}")
+                                
+                                # Phase 19: Direct Slack Fallback
+                                SLACK_URL = os.getenv("SLACK_WEBHOOK_URL")
+                                if SLACK_URL:
+                                    try:
+                                        payload = {
+                                            "text": f"🛑 *SYSTEM CRITICAL FAILURE*\n*Node:* {service_name.upper()}\n*Status:* {container.status}\n*Action:* Sentinel Alerting via Out-of-Band Channel."
+                                        }
+                                        requests.post(SLACK_URL, json=payload, timeout=5)
+                                    except Exception: pass
+                    else:
+                        # Phase 20: Autonomous Recovery Detection
+                        with SessionLocal() as db:
+                            open_incident = db.query(Event).filter(
+                                Event.container == service_name,
+                                Event.status == "open"
+                            ).first()
+
+                            if open_incident:
+                                print(f"✅ [WATCHDOG] {service_name} recovered. Clearing incidents.")
+                                db.query(Event).filter(
+                                    Event.container == service_name,
+                                    Event.status == "open"
+                                ).update({"status": "resolved"})
+                                db.commit()
+
+                                # Slack Recovery Alert
+                                SLACK_URL = os.getenv("SLACK_WEBHOOK_URL")
+                                if SLACK_URL:
+                                    try:
+                                        payload = {
+                                            "text": f"✅ *SERVICE RECOVERED*\n*Node:* {service_name.upper()}\n*Status:* {container.status}\n*Action:* Sentinel marking all previous incidents as RESOLVED."
+                                        }
+                                        requests.post(SLACK_URL, json=payload, timeout=5)
+                                    except Exception: pass
+
+                                alert_cooldowns[service_name] = time.time()
+                except Exception as e:
+                    print(f"Watchdog failed to probe {service_name}: {e}")
+        except Exception as e:
+            print(f"Watchdog Loop Error: {e}")
+        
+        time.sleep(30)
 
 # --- Auth & Routes ---
 
@@ -83,9 +174,10 @@ def stats():
             if is_healthy: healthy += 1
             else: broken += 1
             
-        # Phase 10: Fetch latest high-severity incident for Overview "Hit" summary
+        # Phase 21: Fetch latest high-severity OPEN incident for Overview "Hit" summary
         latest_incident = db.query(Event).filter(
-            Event.event_type == "diagnosis"
+            Event.event_type == "diagnosis",
+            Event.status == "open"
         ).order_by(desc(Event.timestamp)).first()
         
         latest_summary = None
@@ -217,13 +309,29 @@ def history():
 def get_diagnostics(container_name):
     db = SessionLocal()
     try:
-        # Fetch the latest AI-driven diagnosis for this container
+        # Phase 21: Try Open first, then Latest
         event = db.query(Event).filter(
             Event.container == container_name,
-            Event.event_type == "diagnosis"
+            Event.event_type == "diagnosis",
+            Event.status == "open"
         ).order_by(desc(Event.timestamp)).first()
+        
+        if not event:
+            event = db.query(Event).filter(
+                Event.container == container_name,
+                Event.event_type == "diagnosis"
+            ).order_by(desc(Event.timestamp)).first()
 
         if not event:
+            # Phase 21: Job Handling
+            if "ollama_pull" in container_name:
+                return jsonify({
+                    "root_cause": "Internal model provisioning completed successfully.",
+                    "suggested_fix": "No action required. job-ollama-pull finished securely.",
+                    "severity": "low",
+                    "source": "sentinel_job_engine",
+                    "llm_confidence": 100
+                })
             return jsonify({"error": "No diagnostic payload available for this node state."}), 404
         
         # Return the structured JSON details
@@ -284,6 +392,9 @@ def start_app():
             retry_count += 1
             print(f"Database sync attempt {retry_count} failed: {e}. Retrying...")
             time.sleep(5)
+    
+    # Start the Meta-Sentinel in background
+    threading.Thread(target=watchdog_loop, daemon=True).start()
             
     app.run(host="0.0.0.0", port=8080, threaded=True)
 

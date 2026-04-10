@@ -5,7 +5,11 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, J
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, session
 from pgvector.sqlalchemy import Vector
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+# Phase 21: Indian Standard Time (IST) Logic
+IST = timezone(timedelta(hours=5, minutes=30))
+def get_now_ist():
+    return datetime.now(IST)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://tulsi1:Tulsi%402211@db:5432/mydb")
 
@@ -40,7 +44,7 @@ class Event(Base):
     event_type = Column(String(50), index=True)  # e.g., restart, error, diagnosis
     details = Column(JSON)
     status = Column(String(50), index=True, default="open") # open, resolved, archived
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=get_now_ist)
 
 class Metric(Base):
     """
@@ -53,7 +57,7 @@ class Metric(Base):
     mem_usage_mb = Column(Float)
     disk_read_mb = Column(Float, default=0.0)
     disk_write_mb = Column(Float, default=0.0)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=get_now_ist)
 
 class IncidentKnowledge(Base):
     """

@@ -1,6 +1,8 @@
 import docker
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+IST = timezone(timedelta(hours=5, minutes=30))
+IST = timezone(timedelta(hours=5, minutes=30))
 from shared.db import SessionLocal, Event
 
 class CircuitBreaker:
@@ -13,7 +15,7 @@ class CircuitBreaker:
         """
         Check if the circuit is 'Open' (Actions Blocked).
         """
-        now = datetime.utcnow()
+        now = datetime.now(IST)
         if container_name not in self.history:
             return False
             
@@ -24,7 +26,7 @@ class CircuitBreaker:
         return len(self.history[container_name]) >= self.threshold
 
     def record_attempt(self, container_name):
-        self.history.setdefault(container_name, []).append(datetime.utcnow())
+        self.history.setdefault(container_name, []).append(datetime.now(IST))
 
 class RecoveryManager:
     def __init__(self):

@@ -3,7 +3,9 @@ import json
 import yaml
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+IST = timezone(timedelta(hours=5, minutes=30))
+IST = timezone(timedelta(hours=5, minutes=30))
 from confluent_kafka import Consumer, Producer, KafkaException
 from sentence_transformers import SentenceTransformer
 from shared.db import SessionLocal, Event, IncidentKnowledge, Metric, init_db
@@ -53,7 +55,7 @@ def push_to_dlq(packet, reason):
     """
     producer = get_kafka_producer()
     packet["dlq_reason"] = reason
-    packet["dlq_timestamp"] = datetime.utcnow().isoformat()
+    packet["dlq_timestamp"] = datetime.now(IST).isoformat()
     producer.produce(KAFKA_TOPIC_DLQ, json.dumps(packet).encode('utf-8'))
     producer.flush()
     print(f"📦 Message pushed to DLQ: {reason}")
@@ -106,8 +108,9 @@ def intelligent_reasoning(log_msg, container_name):
     """
     prompt = f"Analyze this Docker log from {container_name} and return JSON (root_cause, severity, suggested_fix, confidence_score): {log_msg}"
     
-    # TIER 1: OLLAMA (Mistral)
+    # TIER 1: OLLAMA (Mistral Local Fallback)
     try:
+        # Use a timeout to prevent hanging on local model latency
         response = ollama.generate(model='mistral', prompt=prompt)
         diag = json.loads(response['response'])
         conf_score = diag.get("confidence_score", 0)
@@ -118,25 +121,28 @@ def intelligent_reasoning(log_msg, container_name):
     except Exception as e:
         print(f"Ollama bypassed: {e}")
 
-    # TIER 2: GROQ (Llama 8B/70B)
-    try:
-        chat_completion = groq_client.chat.completions.create(
-            messages=[{
-                "role": "system",
-                "content": "You are a senior DevOps SRE. Return ONLY JSON with fields: root_cause, severity, suggested_fix, confidence_score."
-            }, {
-                "role": "user",
-                "content": prompt
-            }],
-            model="llama-3.1-70b-versatile",
-            response_format={"type": "json_object"}
-        )
-        diag = json.loads(chat_completion.choices[0].message.content)
-        diag["source"] = "tier2_groq_llama3"
-        diag["llm_confidence"] = diag.get("confidence_score", 100)
-        return diag
-    except Exception as e:
-        print(f"Tier 2 (Groq) failed: {e}")
+    # TIER 2: GROQ (Cloud Deep Reasoning)
+    for retry in range(2):
+        try:
+            chat_completion = groq_client.chat.completions.create(
+                messages=[{
+                    "role": "system",
+                    "content": "You are a senior DevOps SRE. Return ONLY JSON with fields: root_cause, severity, suggested_fix, confidence_score."
+                }, {
+                    "role": "user",
+                    "content": prompt
+                }],
+                model="llama-3.1-70b-versatile",
+                response_format={"type": "json_object"},
+                timeout=10 # Cap the cloud latency
+            )
+            diag = json.loads(chat_completion.choices[0].message.content)
+            diag["source"] = "tier2_groq_llama3"
+            diag["llm_confidence"] = diag.get("confidence_score", 100)
+            return diag
+        except Exception as e:
+            print(f"Tier 2 (Groq) Attempt {retry+1} failed: {e}")
+            time.sleep(1)
             
     return None
 
@@ -225,7 +231,7 @@ def process_log_packet(packet):
 
 # Metric Batching for DB Efficiency
 metric_buffer = []
-last_flush = datetime.utcnow()
+last_flush = datetime.now(IST)
 
 def process_metric_packet(packet):
     """
@@ -257,7 +263,7 @@ def flush_metrics():
         print(f"Failed to flush metrics: {e}")
     finally:
         metric_buffer = []
-        last_flush = datetime.utcnow()
+        last_flush = datetime.now(IST)
 
 def main():
     print("Incident Processor Service Starting (Reliability Mode)...")

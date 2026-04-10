@@ -68,8 +68,24 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
-          cpus: '1.0'
+          memory: 4G
+          cpus: '2.0'
+
+  ollama_pull:
+    image: curlimages/curl:latest
+    container_name: ollama_pull
+    networks:
+      - doctor-net
+    depends_on:
+      - ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "until curl -s http://ollama:11434/api/tags | grep -q 'mistral'; do
+        echo 'Pulling Mistral model for Sentience Fallback...';
+        curl -X POST http://ollama:11434/api/pull -d '{\"name\": \"mistral\"}';
+        sleep 5;
+      done;
+      echo 'Mistral sentinel model verified.'"
 
   # --- MONITORING SERVICES ---
 
@@ -109,7 +125,7 @@ services:
     depends_on:
       - db
       - kafka
-      - ollama
+      - ollama_pull
     networks:
       - doctor-net
     volumes:
@@ -176,7 +192,7 @@ services:
   tunnel:
     image: cloudflare/cloudflared:latest
     container_name: cloudflare_tunnel
-    command: tunnel --url http://dashboard_api:8080
+    command: tunnel --protocol http2 --url http://dashboard_api:8080
     networks:
       - doctor-net
     restart: always

@@ -4,7 +4,9 @@ import os
 import threading
 import time
 from confluent_kafka import Producer
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+IST = timezone(timedelta(hours=5, minutes=30))
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # --- Config ---
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -45,7 +47,7 @@ def stream_container_logs(container_name, producer):
                 "project": container.labels.get('com.docker.compose.project', 'standalone'),
                 "project_cluster": list(container.attrs.get('NetworkSettings', {}).get('Networks', {}).keys())[0] if container.attrs.get('NetworkSettings', {}).get('Networks') else "default",
                 "log": log_line,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now(IST).isoformat()
             }
             
             producer.produce(
@@ -110,7 +112,7 @@ def stream_container_stats(container_name, producer):
                     "mem_limit_mb": round(mem_stats.get('limit', 1) / (1024 * 1024), 2),
                     "disk_read_mb": round(disk_read / (1024 * 1024), 2),
                     "disk_write_mb": round(disk_write / (1024 * 1024), 2),
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now(IST).isoformat()
                 }
                 
                 producer.produce(
@@ -172,7 +174,7 @@ def main():
                                 "container": name,
                                 "project": c.labels.get('com.docker.compose.project', 'standalone'),
                                 "log": f"[SYSTEM_HEAL] Container state changed to: {current_status}",
-                                "timestamp": datetime.utcnow().isoformat()
+                                "timestamp": datetime.now(IST).isoformat()
                             }
                             producer.produce(KAFKA_TOPIC_LOGS, key=name, value=json.dumps(payload))
                         
@@ -184,7 +186,7 @@ def main():
                                 "project": c.labels.get('com.docker.compose.project', 'standalone'),
                                 "log": f"[SYSTEM_HEALED] Container has recovered to healthy state.",
                                 "status": "resolved",
-                                "timestamp": datetime.utcnow().isoformat()
+                                "timestamp": datetime.now(IST).isoformat()
                             }
                             producer.produce(KAFKA_TOPIC_LOGS, key=name, value=json.dumps(payload))
                         

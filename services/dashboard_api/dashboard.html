@@ -149,6 +149,12 @@
             border-radius: 12px;
             background: rgba(30, 41, 59, 0.7);
             border: 1px solid var(--glass-border);
+            cursor: pointer;
+            transition: transform 0.2s, background 0.2s;
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            background: rgba(45, 55, 72, 0.8);
         }
 
         .stat-val {
@@ -521,19 +527,19 @@
         <div class="container-scroll">
             <div id="overview" class="tab-content active">
                 <div class="stats-grid">
-                    <div class="stat-card">
+                    <div class="stat-card" onclick="switchTab('explorer')">
                         <div class="stat-val" id="stat-total">0</div>
                         <div class="stat-label">Total Projects</div>
                     </div>
-                    <div class="stat-card">
+                    <div class="stat-card" onclick="switchTab('explorer')">
                         <div class="stat-val" id="stat-tracked" style="color:var(--accent-blue)">0</div>
                         <div class="stat-label">Tracked Projects</div>
                     </div>
-                    <div class="stat-card">
+                    <div class="stat-card" onclick="switchTab('explorer')">
                         <div class="stat-val" id="stat-healthy" style="color:var(--low-severity)">0</div>
                         <div class="stat-label">Healthy Containers</div>
                     </div>
-                    <div class="stat-card">
+                    <div class="stat-card" onclick="switchTab('explorer')">
                         <div class="stat-val" id="stat-broken" style="color:var(--high-severity)">0</div>
                         <div class="stat-label">Broken Containers</div>
                     </div>
@@ -770,30 +776,41 @@
             // 3. History & Diagnostics
             apiCall('/history', (data) => {
                 const tbody = document.getElementById('history-body');
-                tbody.innerHTML = data.recent.map(h => `
+                window.historyCache = data.recent || []; // Phase 19: Safe cache
+                tbody.innerHTML = data.recent.map((h, idx) => `
                     <tr>
                         <td><strong>${h.container}</strong></td>
                         <td><span class="severity-badge" style="background:rgba(255,255,255,0.1)">${h.event}</span></td>
-                        <td style="color:var(--text-secondary)">${new Date(h.timestamp).toLocaleString()}</td>
-                        <td><button class="btn-view" onclick='showDump(${JSON.stringify(h.details)})'>Audit Data</button></td>
+                        <td style="color:var(--text-secondary)">${new Date(h.timestamp).toLocaleString('en-IN')}</td>
+                        <td><button class="btn-view" onclick="showDump(${idx})">Audit Data</button></td>
                     </tr>
                 `).join('') || '<tr><td colspan="4">No recent activity logged.</td></tr>';
 
-                const diagEvents = data.recent.filter(h => h.event === 'diagnosis').slice(0, 6);
+                // Phase 20: Unique Active Diagnostics (Only show latest per container)
+                const uniqueDiags = [];
+                const seenContainers = new Set();
+                data.recent.filter(h => h.event === 'diagnosis').forEach(evt => {
+                    if (!seenContainers.has(evt.container)) {
+                        uniqueDiags.push(evt);
+                        seenContainers.add(evt.container);
+                    }
+                });
+
                 const grid = document.getElementById('diagnostics-grid');
-                if (diagEvents.length === 0) {
+                if (uniqueDiags.length === 0) {
                     grid.innerHTML = '<div class="hero-healthy">✨ All infrastructure nodes are functioning within normal operational bounds.</div>';
                 } else {
-                    grid.innerHTML = diagEvents.map(evt => {
+                    grid.innerHTML = uniqueDiags.slice(0, 6).map(evt => {
                         const d = evt.details;
                         const sev = d.severity ? d.severity.toLowerCase() : 'low';
+                        const confidence = d.llm_confidence !== undefined ? d.llm_confidence : '0';
                         return `
                             <div class="card glass ${sev}">
                                 <div class="card-header"><h3>${evt.container}</h3><span class="severity-badge ${sev}-badge">${sev}</span></div>
-                                <div style="color:var(--text-secondary);font-size:11px;margin-bottom:8px">${new Date(evt.timestamp).toLocaleString()}</div>
+                                <div style="color:var(--text-secondary);font-size:11px;margin-bottom:8px">${new Date(evt.timestamp).toLocaleString('en-IN')}</div>
                                 <div class="card-field"><span class="field-label">Cause:</span> ${d.root_cause}</div>
                                 <div class="card-field"><span class="field-label">Fix:</span> ${d.suggested_fix}</div>
-                                <div class="card-field"><span class="field-label">AI Confidence:</span> ${d.llm_confidence}%</div>
+                                <div class="card-field"><span class="field-label">AI Confidence:</span> ${confidence}%</div>
                             </div>
                         `;
                     }).join('');
@@ -832,10 +849,12 @@
             });
         }
 
-        function showDump(data) {
+        function showDump(index) {
+            const data = window.historyCache[index];
+            if (!data) return;
             const modal = document.getElementById("detailModal");
             document.getElementById("diag-title").innerText = "Raw Audit Node";
-            document.getElementById("diag-content").innerHTML = `<pre class="code-block">${JSON.stringify(data, null, 2)}</pre>`;
+            document.getElementById("diag-content").innerHTML = `<pre class="code-block">${JSON.stringify(data.details, null, 2)}</pre>`;
             modal.showModal();
         }
 
