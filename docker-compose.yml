@@ -44,10 +44,10 @@ services:
     networks:
       - doctor-net
     healthcheck:
-      # Use native Kafka tool and relax timing for first-boot latency
-      test: ["CMD-SHELL", "/usr/bin/kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      # High-speed native bash port probe to bypass Java VM overhead
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9092' || exit 1"]
       interval: 5s
-      timeout: 5s
+      timeout: 10s
       retries: 30
     deploy:
       resources:
