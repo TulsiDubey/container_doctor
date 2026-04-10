@@ -205,7 +205,7 @@ Refer to **[TEST_GUIDE.md](file:///home/tulsi/container-doctor/TEST_GUIDE.md)** 
 Login
 <img width="579" height="505" alt="image" src="https://github.com/user-attachments/assets/0d6c4668-8797-4eed-8aa7-686de0a262e8" />
 Dashboard
-<img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/da05fb43-39a9-41e2-8a95-694b1a1d91b3" />
+<img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/578a211b-5f03-4f12-b320-90e628cab62d" />
 Container-Overview
 <img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/55845920-9d01-4515-a07d-fbd85ea67da5" />
 De-Link Project
