@@ -146,8 +146,17 @@ def process_log_packet(packet):
     """
     log_msg = packet.get("log", "")
     container_name = packet.get("container", "unknown")
-    
     with SessionLocal() as db:
+        # Phase 15: Handle Resolution/Recovery
+        if packet.get("status") == "resolved":
+            print(f"🌲 [RESOLVE] Marking all incidents for {container_name} as resolved.")
+            db.query(Event).filter(
+                Event.container == container_name,
+                Event.status == "open"
+            ).update({"status": "resolved"})
+            db.commit()
+            return
+
         # 1. Rules
         diagnosis = run_rule_engine(log_msg)
         

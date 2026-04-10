@@ -39,6 +39,7 @@ class Event(Base):
     project = Column(String(255), index=True)
     event_type = Column(String(50), index=True)  # e.g., restart, error, diagnosis
     details = Column(JSON)
+    status = Column(String(50), index=True, default="open") # open, resolved, archived
     timestamp = Column(DateTime, default=datetime.utcnow)
 
 class Metric(Base):

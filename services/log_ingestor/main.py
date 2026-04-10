@@ -58,7 +58,7 @@ def stream_container_logs(container_name, producer):
             
     except Exception as e:
         print(f"Error streaming logs for {container_name}: {e}")
-        time.sleep(5) # Backoff before retry
+        time.sleep(20) # Backoff before retry
         stream_container_logs(container_name, producer)
 
 def stream_container_stats(container_name, producer):
@@ -89,13 +89,15 @@ def stream_container_stats(container_name, producer):
                     num_cpus = len(percpu) if percpu else 1
                     cpu_percent = (cpu_delta / system_delta) * num_cpus * 100.0
 
-                # Disk I/O Extraction (Phase 6)
+                # Disk I/O Extraction (Phase 6: Hardened)
                 blkio = stats.get('blkio_stats', {})
                 disk_read = 0
                 disk_write = 0
                 
-                # Service types: Read (1/0), Write (1/0) - aggregating across all devices
-                for entry in blkio.get('io_service_bytes_recursive', []):
+                # Check recursive first, then fallback to standard (depends on Docker version/driver)
+                io_stats = blkio.get('io_service_bytes_recursive') or blkio.get('io_service_bytes') or []
+                
+                for entry in io_stats:
                     if entry.get('op') == 'Read':
                         disk_read += entry.get('value', 0)
                     elif entry.get('op') == 'Write':
@@ -150,25 +152,43 @@ def main():
                 tm.start()
                 threads.append(tm)
                 
-            # Phase 7: Proactive Health Heartbeat Loop
+            # Phase 7 & 15: Proactive Health & Recovery Tracking
             client = docker.from_env()
+            last_states = {} # Track states for recovery detection
+            
             while True:
-                # Detects containers that are silent/stopped and triggers AI analysis
                 for name in TARGET_CONTAINERS:
                     name = name.strip()
                     if not name: continue
                     
                     try:
                         c = client.containers.get(name)
-                        if c.status != "running":
+                        current_status = c.status
+                        last_status = last_states.get(name, "running")
+
+                        if current_status != "running":
                             print(f"⚠️ [HEARTBEAT] Detected DOWN node: {name}. Triggering AI Diagnostic...")
                             payload = {
                                 "container": name,
                                 "project": c.labels.get('com.docker.compose.project', 'standalone'),
-                                "log": f"[SYSTEM_HEAL] Container state changed to: {c.status}",
+                                "log": f"[SYSTEM_HEAL] Container state changed to: {current_status}",
                                 "timestamp": datetime.utcnow().isoformat()
                             }
                             producer.produce(KAFKA_TOPIC_LOGS, key=name, value=json.dumps(payload))
+                        
+                        # Recovery Detection (Phase 15)
+                        elif current_status == "running" and last_status != "running":
+                            print(f"🌲 [RECOVERY] Node {name} has returned to running. Sending Resolve event...")
+                            payload = {
+                                "container": name,
+                                "project": c.labels.get('com.docker.compose.project', 'standalone'),
+                                "log": f"[SYSTEM_HEALED] Container has recovered to healthy state.",
+                                "status": "resolved",
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                            producer.produce(KAFKA_TOPIC_LOGS, key=name, value=json.dumps(payload))
+                        
+                        last_states[name] = current_status
                     except Exception as e:
                         print(f"Heartbeat error for {name}: {e}")
 

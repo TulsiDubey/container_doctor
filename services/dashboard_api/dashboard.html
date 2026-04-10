@@ -726,9 +726,10 @@
                             const insightText = c.reason || "Healthy";
                             const insightColor = c.health === 'broken' ? 'var(--high-severity)' : 'var(--text-secondary)';
                             const diagBtn = c.health === 'broken' ? 
-                                `<div style="display:flex; flex-direction:column; gap:4px;">
+                                `<div style="display:flex; flex-direction:column; gap:2px;">
                                     <span style="color:${insightColor}; font-size:11px; font-weight:bold;">${insightText.toUpperCase()}</span>
-                                    <span class="severity-badge high-badge" style="cursor:pointer; font-size:10px; padding:2px 6px;" onclick="drilldownDiagnosis('${c.name}')">DEEP ANALYZE</span>
+                                    <span style="font-size:10px; color:var(--text-secondary)">Sentience: ${c.llm_confidence}%</span>
+                                    <span class="severity-badge high-badge" style="cursor:pointer; font-size:10px; padding:2px 6px; margin-top:4px;" onclick="drilldownDiagnosis('${c.name}')">DEEP ANALYZE</span>
                                  </div>` : 
                                 `<span class="severity-badge low-badge">STABLE</span>`;
 
@@ -889,9 +890,9 @@
             document.getElementById(tabId).classList.add('active');
             if (el) el.classList.add('active');
 
-            // 2. Real-time Log Logic
+            // 2. Real-time Log Logic (Phase 15: 20s Sync)
             if (tabId === 'logs') {
-                if (!logInterval) logInterval = setInterval(fetchLogs, 2000);
+                if (!logInterval) logInterval = setInterval(fetchLogs, 20000);
             } else {
                 if (logInterval) { clearInterval(logInterval); logInterval = null; }
             }

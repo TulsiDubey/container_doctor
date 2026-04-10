@@ -16,19 +16,24 @@ class NotificationManager:
         self.smtp_pass = os.getenv("SMTP_PASS", "")
         self.alert_email = os.getenv("ALERT_EMAIL", "admin@localhost")
         
-        # Alert Cooldown: [Container_Name] -> Last_Alert_Time
-        self.cooldowns = {}
+        # Alert Memory: [Container_Name] -> {"timestamp": datetime, "cause": str}
+        self.alert_memory = {}
         self.COOLDOWN_PERIOD = timedelta(minutes=15)
 
     def send_alert(self, container, diagnosis):
         severity = diagnosis.get("severity", "low").upper()
+        root_cause = diagnosis.get("root_cause", "Anomaly")
         if severity == "LOW": return # Silently log low-sev
         
-        # Cooldown check
-        last_alert = self.cooldowns.get(container)
-        if last_alert and (datetime.utcnow() - last_alert) < self.COOLDOWN_PERIOD:
-            print(f"🔔 Alert Cooldown Active for {container}. Skipping notification.")
-            return
+        # Deduplication & Cooldown check
+        last_alert = self.alert_memory.get(container)
+        if last_alert:
+            time_since = (datetime.utcnow() - last_alert["timestamp"])
+            is_same_cause = (last_alert["cause"] == root_cause)
+            
+            if is_same_cause and time_since < self.COOLDOWN_PERIOD:
+                print(f"🔔 [DEDUPE] Alert for {container} with cause '{root_cause}' suppressed (Cooldown active).")
+                return
 
         msg = f"🩺 *Container Doctor Alert*\n*Container*: {container}\n*Severity*: {severity}\n*Cause*: {diagnosis['root_cause']}\n*Action*: {diagnosis['suggested_fix']}\n*Confidence*: {diagnosis.get('llm_confidence', 0)}%"
         
@@ -46,7 +51,7 @@ class NotificationManager:
             except Exception as e:
                 print(f"Error sending Email alert: {e}")
 
-        self.cooldowns[container] = datetime.utcnow()
+        self.alert_memory[container] = {"timestamp": datetime.utcnow(), "cause": root_cause}
 
     def _send_email(self, container, severity, msg):
         email_msg = MIMEText(msg)

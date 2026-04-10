@@ -141,12 +141,15 @@ def projects():
             disk_read = f"{round(latest_metric.disk_read_mb, 2)}MB" if latest_metric else "0MB"
             disk_write = f"{round(latest_metric.disk_write_mb, 2)}MB" if latest_metric else "0MB"
 
-            # Phase 12: Fetch latest AI Reasoning for the "Exact Cause" dashboard column
+            # Phase 12 & 15: Fetch latest active AI Reasoning
             latest_diag = db.query(Event).filter(
                 Event.container == c.name,
-                Event.event_type == "diagnosis"
+                Event.event_type == "diagnosis",
+                Event.status == "open" # Only pull active failures
             ).order_by(desc(Event.timestamp)).first()
+            
             reason = latest_diag.details.get("root_cause", "Pending Diagnostics") if latest_diag else "Stable"
+            confidence = latest_diag.details.get("llm_confidence", 100) if latest_diag else 100
 
             project_groups[network_id]["items"][p_name]["containers"].append({
                 "id": c.short_id,
@@ -158,7 +161,8 @@ def projects():
                 "ram": mem,
                 "disk_read": disk_read,
                 "disk_write": disk_write,
-                "reason": reason
+                "reason": reason,
+                "llm_confidence": confidence
             })
             
         # Standardized Response Structure: list of groups (formerly namespaces)
@@ -178,17 +182,19 @@ def projects():
 def history():
     db = SessionLocal()
     try:
-        # Phase 10: Support DLQ Filtering
+        # Phase 10 & 15: Filter for Active/Open incidents by default
         filter_type = request.args.get("filter", "all")
         query = db.query(Event).filter(
-            Event.event_type.in_(["diagnosis", "remediation_attempt", "decision_audit"])
+            Event.event_type.in_(["diagnosis", "remediation_attempt", "decision_audit"]),
+            Event.status == "open" # Default to open issues
         )
         
         if filter_type == "dlq":
-            # Filter for events where AI marked 'is_diagnosable' as false
-            # We use a text/json filter for SQLite/Postgres compatibility in this context
             query = query.filter(text("details->>'is_diagnosable' = 'false'"))
-            
+        elif filter_type == "all":
+            # Override default filter if user specifically asks for everything
+            query = db.query(Event).filter(Event.event_type.in_(["diagnosis", "remediation_attempt"]))
+
         events = query.order_by(desc(Event.timestamp)).limit(100).all()
         
         results = []
