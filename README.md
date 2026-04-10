@@ -201,6 +201,7 @@ Refer to **[TEST_GUIDE.md](file:///home/tulsi/container-doctor/TEST_GUIDE.md)** 
 > [!TIP]
 > **Dashboard View**: Real-time project explorer with "In-Flight Insight" columns.
 > **Diagnostic View**: Deep analysis modal showing Groq-determined root cause and severity.
+> Note: Here the screenshots is attched while testing
 Login
 <img width="579" height="505" alt="image" src="https://github.com/user-attachments/assets/0d6c4668-8797-4eed-8aa7-686de0a262e8" />
 Dashboard
@@ -213,8 +214,8 @@ Live-logs
 <img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/34f71051-1af0-4169-890a-0df488086145" />
 Event-history and suggestions
 <img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/61d4d15b-ad89-4a57-a356-d1d10643663c" />
-
-
+Slack alert
+<img width="1860" height="1048" alt="image" src="https://github.com/user-attachments/assets/a12dda23-2f39-498b-adf1-33ec9853414b" />
 
 ---
 
