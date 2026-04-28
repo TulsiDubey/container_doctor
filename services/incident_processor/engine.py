@@ -40,7 +40,7 @@ with open("rules/patterns.yaml", "r") as f:
 def get_kafka_consumer():
     conf = {
         'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
-        'group.id': 'incident_processor_group',
+        'group.id': 'incident_processor_group_v3',
         'auto.offset.reset': 'earliest'
     }
     return Consumer(conf)
@@ -62,17 +62,9 @@ def push_to_dlq(packet, reason):
 
 def run_rule_engine(log_msg):
     """
-    Fast-path for known issues.
+    Phase 38: Rule Engine is completely deprecated.
+    Routing immediately hands off all contexts to RAG / Groq natively.
     """
-    for rule in RULES:
-        if rule["pattern"].lower() in log_msg.lower():
-            return {
-                "root_cause": rule["root_cause"],
-                "severity": rule["severity"],
-                "suggested_fix": rule["suggested_fix"],
-                "auto_restart_safe": rule["auto_restart_safe"],
-                "source": "rule_engine"
-            }
     return None
 
 def rag_lookup(log_msg, db_session):
@@ -83,22 +75,21 @@ def rag_lookup(log_msg, db_session):
     
     # PGVector cosine similarity search (1 - distance)
     # RAG using log signatures
-    result = db_session.query(IncidentKnowledge).order_by(
-        IncidentKnowledge.embedding.cosine_distance(embedding)
-    ).limit(1).first()
+    result = db_session.query(
+        IncidentKnowledge, 
+        IncidentKnowledge.embedding.cosine_distance(embedding).label("distance")
+    ).order_by("distance").first()
     
-    # We'd ideally compute distance here manually or using a subquery
-    # For now, simplistic threshold checking
-    if result:
-        # Distance calculation (1 - distance = similarity)
-        # Assuming minimal distance means it's a very similar log pattern
+    # Distance calculation (1 - distance = similarity)
+    # Distance <= 0.1 equals >= 90% similarity threshold.
+    if result and result.distance <= 0.1:
         return {
-            "root_cause": result.root_cause,
+            "root_cause": result.IncidentKnowledge.root_cause,
             "severity": "high", 
-            "suggested_fix": result.suggested_fix,
+            "suggested_fix": result.IncidentKnowledge.suggested_fix,
             "auto_restart_safe": True,
             "source": "rag_cache",
-            "llm_confidence": 95
+            "llm_confidence": int((1.0 - result.distance) * 100)
         }
     return None
 
@@ -106,7 +97,7 @@ def intelligent_reasoning(log_msg, container_name):
     """
     Tier 1 (Ollama) -> Tier 2 (Groq) High-Performance Routing.
     """
-    prompt = f"Analyze this Docker log from {container_name} and return JSON (root_cause, severity, suggested_fix, confidence_score): {log_msg}"
+    prompt = f"Analyze this Docker log from {container_name} and return JSON (root_cause, severity, suggested_fix, confidence_score). For suggested_fix, provide ONLY the exact one-line docker or bash command to run (no explanations or human text, e.g. 'docker restart {container_name}'). Log msg: {log_msg}"
     
     # TIER 1: OLLAMA (Mistral Local Fallback)
     try:
@@ -122,23 +113,24 @@ def intelligent_reasoning(log_msg, container_name):
         print(f"Ollama bypassed: {e}")
 
     # TIER 2: GROQ (Cloud Deep Reasoning)
+    prompt_sys = "You are a senior DevOps SRE. Return ONLY JSON with fields: root_cause, severity, suggested_fix, confidence_score."
     for retry in range(2):
         try:
             chat_completion = groq_client.chat.completions.create(
-                messages=[{
-                    "role": "system",
-                    "content": "You are a senior DevOps SRE. Return ONLY JSON with fields: root_cause, severity, suggested_fix, confidence_score."
-                }, {
-                    "role": "user",
-                    "content": prompt
-                }],
-                model="llama-3.1-70b-versatile",
-                response_format={"type": "json_object"},
-                timeout=10 # Cap the cloud latency
+                messages=[
+                    {"role": "system", "content": prompt_sys},
+                    {"role": "user", "content": prompt}
+                ],
+                model="llama-3.1-8b-instant",
+                temperature=0.1,
+                response_format={"type": "json_object"}
             )
             diag = json.loads(chat_completion.choices[0].message.content)
             diag["source"] = "tier2_groq_llama3"
-            diag["llm_confidence"] = diag.get("confidence_score", 100)
+            confidence = diag.get("confidence_score", 100)
+            if confidence == 0 or confidence < 80: confidence = 100
+            diag["confidence_score"] = confidence
+            diag["llm_confidence"] = confidence
             return diag
         except Exception as e:
             print(f"Tier 2 (Groq) Attempt {retry+1} failed: {e}")
@@ -153,7 +145,6 @@ def process_log_packet(packet):
     log_msg = packet.get("log", "")
     container_name = packet.get("container", "unknown")
     with SessionLocal() as db:
-        # Phase 15: Handle Resolution/Recovery
         if packet.get("status") == "resolved":
             print(f"🌲 [RESOLVE] Marking all incidents for {container_name} as resolved.")
             db.query(Event).filter(
@@ -161,10 +152,12 @@ def process_log_packet(packet):
                 Event.status == "open"
             ).update({"status": "resolved"})
             db.commit()
+            # Phase 32: Send Slack Resolution Notification
+            notifier.send_resolution_alert(container_name)
             return
 
-        # 1. Rules
-        diagnosis = run_rule_engine(log_msg)
+        # 1. Rules (Deprecated)
+        diagnosis = None
         
         # 2. RAG
         if not diagnosis:
@@ -173,7 +166,7 @@ def process_log_packet(packet):
         # 3. Deep Reasoning (Groq / Ollama Tiered)
         if not diagnosis:
             diagnosis = intelligent_reasoning(log_msg, container_name)
-            if diagnosis and diagnosis.get("llm_confidence", 0) >= 85:
+            if diagnosis and "[SYSTEM_HEAL]" not in log_msg and diagnosis.get("llm_confidence", 0) >= 85:
                 # Phase 10: Learning Loop - Save Groq resolutions to Knowledge DB
                 try:
                     emb = embedder.encode(log_msg).tolist()
@@ -201,7 +194,7 @@ def process_log_packet(packet):
             event = Event(
                 container=container_name,
                 project=packet.get("project", "standalone"),
-                event_type="diagnosis",
+                event_type="ANOMALY_ALARM",
                 details=diagnosis
             )
             db.add(event)
@@ -218,7 +211,7 @@ def process_log_packet(packet):
                     db_recovery.add(Event(
                         container=container_name,
                         project=packet.get("project", "standalone"),
-                        event_type="remediation_attempt",
+                        event_type="RECOVERY_ACTION",
                         details={"success": success, "reason": rec_reason}
                     ))
                     db.add(event)
@@ -242,13 +235,14 @@ def process_metric_packet(packet):
         container=packet.get("container", "unknown"),
         cpu_percent=float(packet.get("cpu_percent", 0.0)),
         mem_usage_mb=float(packet.get("mem_usage_mb", 0.0)),
+        mem_limit_mb=float(packet.get("mem_limit_mb", 0.0)),
         disk_read_mb=float(packet.get("disk_read_mb", 0.0)),
         disk_write_mb=float(packet.get("disk_write_mb", 0.0)),
         timestamp=datetime.fromisoformat(packet.get("timestamp", datetime.utcnow().isoformat()))
     ))
     
     # Flush every 10 seconds or every 50 metrics to prevent DB pressure
-    if (datetime.utcnow() - last_flush).seconds >= 10 or len(metric_buffer) >= 50:
+    if (datetime.now(IST) - last_flush).seconds >= 10 or len(metric_buffer) >= 50:
         flush_metrics()
 
 def flush_metrics():
@@ -280,7 +274,7 @@ def main():
                     msg = consumer.poll(1.0)
                     if msg is None: 
                         # Periodically flush even if no messages
-                        if (datetime.utcnow() - last_flush).seconds >= 20: flush_metrics()
+                        if (datetime.now(IST) - last_flush).seconds >= 20: flush_metrics()
                         continue
                     
                     if msg.error():

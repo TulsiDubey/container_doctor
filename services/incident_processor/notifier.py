@@ -55,13 +55,18 @@ class NotificationManager:
 
         self.alert_memory[container] = {"timestamp": datetime.now(IST), "cause": root_cause}
 
-    def _send_email(self, container, severity, msg):
-        email_msg = MIMEText(msg)
-        email_msg['Subject'] = f"[{severity}] Container Doctor: {container}"
-        email_msg['From'] = self.smtp_user
-        email_msg['To'] = self.alert_email
-
-        with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-            server.starttls()
-            server.login(self.smtp_user, self.smtp_pass)
-            server.send_message(email_msg)
+    def send_resolution_alert(self, container):
+        """
+        Phase 32: Closed-Loop Alerting. Notify when service is restored.
+        """
+        msg = f"🌲 *Container Doctor Recovery*\n*Container*: {container}\n*Status*: Service Restored & Stable.\n*Timestamp*: {datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        if self.slack_url:
+            try:
+                requests.post(self.slack_url, json={"text": msg}, timeout=5)
+            except Exception as e:
+                print(f"Error sending Resolution alert: {e}")
+        
+        # Clear memory to allow new alerts for this container
+        if container in self.alert_memory:
+            del self.alert_memory[container]

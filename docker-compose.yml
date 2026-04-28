@@ -99,6 +99,7 @@ services:
     environment:
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - TARGET_CONTAINERS=web,api,db
+      - PYTHONUNBUFFERED=1
     depends_on:
       kafka:
         condition: service_healthy
@@ -122,6 +123,7 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OLLAMA_HOST=http://ollama:11434
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - PYTHONUNBUFFERED=1
     depends_on:
       - db
       - kafka
@@ -146,6 +148,7 @@ services:
       - "8080:8080"
     environment:
       - DATABASE_URL=postgresql://tulsi1:Tulsi%402211@db:5432/mydb
+      - GROQ_API_KEY=${GROQ_API_KEY}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

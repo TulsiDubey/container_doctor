@@ -4,7 +4,7 @@ import json
 import time
 from flask import Flask, jsonify, request, session, redirect, send_file
 from flask_cors import CORS
-from shared.db import SessionLocal, Event, Metric, init_db
+from shared.db import SessionLocal, Event, Metric, ProjectState, init_db, get_now_ist
 from shared.auth import generate_token, token_required
 from sqlalchemy import desc, func, text
 import threading
@@ -22,95 +22,63 @@ docker_client = None
 
 def get_docker_client():
     global docker_client
-    if docker_client is None:
-        docker_client = docker.from_env()
-    return docker_client
-
+    # Phase 33: Persistent Socket Heartbeat check
+    try:
+        if docker_client is None:
+            if not os.path.exists("/var/run/docker.sock"):
+                print("🚨 [CRITICAL] Docker socket NOT FOUND at /var/run/docker.sock. Dashboard isolating...")
+                return None
+            docker_client = docker.from_env()
+        # Verify connection is still alive
+        docker_client.ping()
+        return docker_client
+    except Exception as e:
+        print(f"📡 [SOCKET_ERROR] Docker connection failed: {e}. Resetting client...")
+        docker_client = None
+        return None
+        
 def watchdog_loop():
     """
-    Phase 18: Meta-Sentinel Watchdog.
-    Monitors the monitors. Bypasses Kafka to report backbone failures.
+    Phase 37: Unified Sentinel Infrastructure.
+    The local Watchdog database injector has been fully deprecated.
+    All Outage occurrences are successfully piped via the log_ingestor over KAFKA
+    directly to Engine.py, triggering the Universal Groq Diagnostic Pipeline.
     """
-    print("🌲 [WATCHDOG] Global Infrastructure Sentinel Active.")
-    critical_services = ["kafka", "ollama", "db"]
-    alert_cooldowns = {} # Prevent alert fatigue
+    pass
 
-    while True:
-        try:
-            client = get_docker_client()
-            for service_name in critical_services:
-                try:
-                    container = client.containers.get(service_name)
-                    if container.status != "running":
-                        # Phase 18 & 20: Deduplicated Direct Injection
-                        with SessionLocal() as db:
-                            # Check if we already have an "Open" incident for this failure
-                            existing = db.query(Event).filter(
-                                Event.container == service_name,
-                                Event.status == "open",
-                                Event.event_type == "diagnosis"
-                            ).first()
+def align_system_health():
+    """
+    Phase 25: Global State Hygiene.
+    Purges stale 'Ghost' incidents on startup if services are already healthy.
+    """
+    print("🧹 [SENTINEL] Aligning Global Infrastructure State Hygiene...")
+    with SessionLocal() as db:
+        for service in ["kafka", "ollama", "db"]:
+            try:
+                container = get_docker_client().containers.get(service)
+                if container.status == "running":
+                    # Phase 26: Fuzzy Name Alignment (LIKE search to clear prefixed names)
+                    db.query(Event).filter(
+                        Event.container.like(f"%{service}%"),
+                        Event.status == "open"
+                    ).update({
+                        "status": "resolved", 
+                        "event_type": "SYSTEM_HEALED"
+                    })
+            except: pass
+        db.commit()
+    print("✅ [SENTINEL] Hygiene Alignment Complete.")
 
-                            if not existing:
-                                event = Event(
-                                    container=service_name,
-                                    project="SENTINEL_SYSTEM",
-                                    event_type="diagnosis",
-                                    status="open",
-                                    details={
-                                        "root_cause": f"CORE INFRASTRUCTURE FAILURE: {service_name.upper()} node is {container.status}.",
-                                        "suggested_fix": f"Critical dependency down. Restart {service_name} via 'docker compose up -d {service_name}'",
-                                        "severity": "critical",
-                                        "source": "meta_watchdog",
-                                        "llm_confidence": 100
-                                    }
-                                )
-                                db.add(event)
-                                db.commit()
-                                print(f"🚨 [WATCHDOG] Logged NEW critical failure for {service_name}")
-                                
-                                # Phase 19: Direct Slack Fallback
-                                SLACK_URL = os.getenv("SLACK_WEBHOOK_URL")
-                                if SLACK_URL:
-                                    try:
-                                        payload = {
-                                            "text": f"🛑 *SYSTEM CRITICAL FAILURE*\n*Node:* {service_name.upper()}\n*Status:* {container.status}\n*Action:* Sentinel Alerting via Out-of-Band Channel."
-                                        }
-                                        requests.post(SLACK_URL, json=payload, timeout=5)
-                                    except Exception: pass
-                    else:
-                        # Phase 20: Autonomous Recovery Detection
-                        with SessionLocal() as db:
-                            open_incident = db.query(Event).filter(
-                                Event.container == service_name,
-                                Event.status == "open"
-                            ).first()
-
-                            if open_incident:
-                                print(f"✅ [WATCHDOG] {service_name} recovered. Clearing incidents.")
-                                db.query(Event).filter(
-                                    Event.container == service_name,
-                                    Event.status == "open"
-                                ).update({"status": "resolved"})
-                                db.commit()
-
-                                # Slack Recovery Alert
-                                SLACK_URL = os.getenv("SLACK_WEBHOOK_URL")
-                                if SLACK_URL:
-                                    try:
-                                        payload = {
-                                            "text": f"✅ *SERVICE RECOVERED*\n*Node:* {service_name.upper()}\n*Status:* {container.status}\n*Action:* Sentinel marking all previous incidents as RESOLVED."
-                                        }
-                                        requests.post(SLACK_URL, json=payload, timeout=5)
-                                    except Exception: pass
-
-                                alert_cooldowns[service_name] = time.time()
-                except Exception as e:
-                    print(f"Watchdog failed to probe {service_name}: {e}")
-        except Exception as e:
-            print(f"Watchdog Loop Error: {e}")
-        
-        time.sleep(30)
+@app.after_request
+def add_header(response):
+    """
+    Phase 26: Cache-Busting Header.
+    Forces browsers to pull the latest 5s sync logic.
+    """
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 # --- Auth & Routes ---
 
@@ -162,7 +130,14 @@ def dashboard():
 def stats():
     db = SessionLocal()
     try:
-        containers = get_docker_client().containers.list(all=True)
+        client = get_docker_client()
+        if not client:
+            return jsonify({
+                "total_projects": 0, "tracked_projects": 0, "healthy_containers": 0, "broken_containers": 0,
+                "latest_incident": None, "error": "Docker Socket Disconnected"
+            })
+            
+        containers = client.containers.list(all=True)
         total_projects = len(set(c.labels.get('com.docker.compose.project', 'standalone') for c in containers))
         
         # In a real distributed system, we'd query a "Heartbeat" or "State" table.
@@ -199,6 +174,31 @@ def stats():
     finally:
         db.close()
 
+@app.route("/recent")
+@token_required
+def get_recent_incidents():
+    """
+    Phase 30: Real-time Incident Heartbeat.
+    Returns the latest events for the Active Diagnostics grid.
+    """
+    db = SessionLocal()
+    try:
+        events = db.query(Event).order_by(desc(Event.timestamp)).limit(50).all()
+        return jsonify({
+            "recent": [
+                {
+                    "id": e.id,
+                    "container": e.container,
+                    "event": e.event_type,
+                    "timestamp": e.timestamp.isoformat(),
+                    "details": e.details if e.details else {},
+                    "status": e.status
+                } for e in events
+            ]
+        })
+    finally:
+        db.close()
+
 @app.route("/projects")
 @token_required
 def projects():
@@ -224,19 +224,28 @@ def projects():
                 project_groups[network_id] = {"group_id": network_id, "items": {}}
             
             if p_name not in project_groups[network_id]["items"]:
-                project_groups[network_id]["items"][p_name] = {"name": p_name, "containers": [], "tracked": True}
+                # Phase 32: Persistent tracking lookup
+                state = db.query(ProjectState).filter(ProjectState.project_name == p_name).first()
+                is_tracked = state.is_tracked if state else True
+                project_groups[network_id]["items"][p_name] = {"name": p_name, "containers": [], "tracked": is_tracked}
             
             # Fetch latest metrics (Phase 8: High Precision)
             latest_metric = db.query(Metric).filter(Metric.container == c.name).order_by(Metric.timestamp.desc()).first()
             cpu = f"{round(latest_metric.cpu_percent, 2)}%" if latest_metric else "0%"
             mem = f"{round(latest_metric.mem_usage_mb, 2)}MB" if latest_metric else "0MB"
-            disk_read = f"{round(latest_metric.disk_read_mb, 2)}MB" if latest_metric else "0MB"
-            disk_write = f"{round(latest_metric.disk_write_mb, 2)}MB" if latest_metric else "0MB"
+            mem_limit = f"{round(latest_metric.mem_limit_mb, 2)}MB" if latest_metric and latest_metric.mem_limit_mb else "0MB"
+            
+            # Safe division check for memory % representation
+            if latest_metric and latest_metric.mem_limit_mb > 0:
+                calc_percent = (latest_metric.mem_usage_mb / latest_metric.mem_limit_mb) * 100
+                mem_percent = f"{round(calc_percent, 2)}%"
+            else:
+                mem_percent = "0%"
 
-            # Phase 12 & 15: Fetch latest active AI Reasoning
+            # Phase 12 & 15: Fetch latest active AI Reasoning (Diagnosis or Anomalies)
             latest_diag = db.query(Event).filter(
                 Event.container == c.name,
-                Event.event_type == "diagnosis",
+                Event.event_type.in_(["diagnosis", "ANOMALY_ALARM", "OUTAGE_DETECTED"]),
                 Event.status == "open" # Only pull active failures
             ).order_by(desc(Event.timestamp)).first()
             
@@ -251,8 +260,8 @@ def projects():
                 "health": "healthy" if c.status == "running" else "broken",
                 "cpu": cpu,
                 "ram": mem,
-                "disk_read": disk_read,
-                "disk_write": disk_write,
+                "mem_limit": mem_limit,
+                "mem_percent": mem_percent,
                 "reason": reason,
                 "llm_confidence": confidence
             })
@@ -269,15 +278,37 @@ def projects():
     finally:
         db.close()
 
+@app.route("/project/tracking", methods=["POST"])
+@token_required
+def toggle_project_tracking():
+    """
+    Phase 32: Persistent Link/De-Link.
+    """
+    data = request.json
+    p_name = data.get("project_name")
+    is_tracked = data.get("tracked", True)
+    
+    with SessionLocal() as db:
+        state = db.query(ProjectState).filter(ProjectState.project_name == p_name).first()
+        if not state:
+            state = ProjectState(project_name=p_name)
+            db.add(state)
+        
+        state.is_tracked = is_tracked
+        state.last_updated = get_now_ist()
+        db.commit()
+        
+    return jsonify({"success": True})
+
 @app.route("/history")
 @token_required
 def history():
     db = SessionLocal()
     try:
-        # Phase 10 & 15: Filter for Active/Open incidents by default
+        # Phase 10 & 15 & 35: Filter for Active/Open incidents by default, including Anomalies
         filter_type = request.args.get("filter", "all")
         query = db.query(Event).filter(
-            Event.event_type.in_(["diagnosis", "remediation_attempt", "decision_audit"]),
+            Event.event_type.in_(["diagnosis", "remediation_attempt", "decision_audit", "ANOMALY_ALARM", "OUTAGE_DETECTED", "SYSTEM_HEALED", "RECOVERY_ACTION"]),
             Event.status == "open" # Default to open issues
         )
         
@@ -285,7 +316,9 @@ def history():
             query = query.filter(text("details->>'is_diagnosable' = 'false'"))
         elif filter_type == "all":
             # Override default filter if user specifically asks for everything
-            query = db.query(Event).filter(Event.event_type.in_(["diagnosis", "remediation_attempt"]))
+            query = db.query(Event).filter(
+                Event.event_type.in_(["diagnosis", "remediation_attempt", "decision_audit", "ANOMALY_ALARM", "OUTAGE_DETECTED", "SYSTEM_HEALED", "RECOVERY_ACTION"])
+            )
 
         events = query.order_by(desc(Event.timestamp)).limit(100).all()
         
@@ -295,6 +328,7 @@ def history():
                 "container": e.container,
                 "project": e.project or "standalone",
                 "event": e.event_type,
+                "status": e.status,
                 "timestamp": e.timestamp.isoformat(),
                 "details": e.details
             }
@@ -304,22 +338,49 @@ def history():
     finally:
         db.close()
 
+@app.route("/metrics/historical", methods=["GET"])
+@token_required
+def get_historical_metrics():
+    """
+    Phase 39: Returns chronological metrics for graph rendering.
+    """
+    try:
+        db = SessionLocal()
+        container = request.args.get('container')
+        
+        query = db.query(Metric)
+        if container: query = query.filter(Metric.container == container)
+        metrics = query.order_by(desc(Metric.id)).limit(50).all()
+        metrics.reverse()
+        
+        results = [{
+            "container": m.container,
+            "cpu_percent": float(m.cpu_percent) if m.cpu_percent else 0,
+            "mem_percent": float(m.mem_usage_mb)/float(m.mem_limit_mb)*100 if m.mem_limit_mb and m.mem_limit_mb > 0 else 0,
+            "timestamp": m.timestamp.isoformat()
+        } for m in metrics]
+        return jsonify({"success": True, "metrics": results})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        db.close()
+
 @app.route("/diagnostics/<container_name>")
 @token_required
 def get_diagnostics(container_name):
     db = SessionLocal()
     try:
-        # Phase 21: Try Open first, then Latest
+        # Phase 21 & 35: Try Open first, then Latest.
         event = db.query(Event).filter(
             Event.container == container_name,
-            Event.event_type == "diagnosis",
+            Event.event_type.in_(["diagnosis", "ANOMALY_ALARM", "OUTAGE_DETECTED"]),
             Event.status == "open"
         ).order_by(desc(Event.timestamp)).first()
         
         if not event:
             event = db.query(Event).filter(
                 Event.container == container_name,
-                Event.event_type == "diagnosis"
+                Event.event_type.in_(["diagnosis", "ANOMALY_ALARM", "OUTAGE_DETECTED"])
             ).order_by(desc(Event.timestamp)).first()
 
         if not event:
@@ -377,6 +438,157 @@ def get_logs(container_name):
     except Exception as e:
         return jsonify({"logs": str(e), "success": False}), 500
 
+@app.route("/terminal/exec", methods=["POST"])
+@token_required
+def terminal_exec():
+    """
+    Phase 28: Sentinel Executive Shell.
+    Provides direct command execution on targeted containers.
+    """
+    data = request.json
+    container_name = data.get("container")
+    command = data.get("command")
+    
+    # Safety Filter (Phase 32: Commander Mode - Loosened to allow any command with log)
+    # Block ONLY absolute system-destroyers
+    blocked = ["rm -rf /", "mkfs", "dd if=/dev/zero"]
+    if any(b in command for b in blocked):
+        return jsonify({"error": "Sentinel blocked absolute destructive command."}), 403
+
+    print(f"🛡️ [COMMANDER_MODE] Executing manual command on {container_name}: {command}")
+    
+    try:
+        client = get_docker_client()
+        
+        # Intercept Host Context Docker Commands
+        if command.startswith("docker "):
+            parts = command.split()
+            if len(parts) >= 3:
+                action = parts[1]
+                target = parts[2]
+                target_container = client.containers.get(target)
+                if action == "start": target_container.start()
+                elif action == "stop": target_container.stop()
+                elif action == "restart": target_container.restart()
+                elif action == "kill": target_container.kill()
+                else: return jsonify({"error": f"Unsupported sentinel docker action: {action}", "status": "failed"}), 400
+                return jsonify({"output": f"[HOST] Successfully executed docker {action} on {target}", "exit_code": 0, "status": "success"})
+            else:
+                return jsonify({"error": "Invalid docker command format.", "status": "failed"}), 400
+
+        # Sub-container contextual shell
+        container = client.containers.get(container_name)
+        if container.status != "running":
+            return jsonify({"error": f"Node '{container_name}' is currently offline. Please run 'docker start {container_name}' to boot it before issuing internal commands.", "status": "failed"}), 200
+
+        result = container.exec_run(["/bin/sh", "-c", command], environment={"TERM": "xterm"})
+        return jsonify({
+            "output": result.output.decode("utf-8") if result.output else "Command executed (No output).",
+            "exit_code": result.exit_code,
+            "status": "success"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "failed"}), 500
+
+@app.route("/terminal/autocomplete", methods=["POST"])
+@token_required
+def terminal_autocomplete():
+    """
+    Phase 35 & 39: Sentinel Predictive Autocomplete.
+    Uses cloud LLM to infer the rest of the bash command contextually avoiding hallucinations by binding to the active problem.
+    """
+    data = request.json
+    container_name = data.get("container", "unknown")
+    current_input = data.get("input", "")
+    
+    if len(current_input) < 2:
+        return jsonify({"suggestion": ""})
+
+    try:
+        problem_context = ""
+        db = SessionLocal()
+        try:
+            event = db.query(Event).filter(
+                Event.container == container_name,
+                Event.event_type.in_(["diagnosis", "ANOMALY_ALARM", "OUTAGE_DETECTED"]),
+                Event.status == "open"
+            ).order_by(desc(Event.timestamp)).first()
+            if event and event.details:
+                cause = event.details.get("root_cause", "Unknown error")
+                problem_context = f"The container crashed due to: '{cause}'."
+        finally:
+            db.close()
+            
+        prompt = f"Complete this linux terminal command being typed by a sysadmin handling the container '{container_name}'. {problem_context} Current input: '{current_input}'. Respond with ONLY the exact continuation characters (the suffix). Do not repeat the `{current_input}` part. No quotes around it, no markdown formatting. Keep it short."
+        suggestion = ""
+
+        api_key = os.getenv("GROQ_API_KEY", "")
+        if api_key:
+            from groq import Groq
+            groq_client = Groq(api_key=api_key)
+            completion = groq_client.chat.completions.create(
+                messages=[{
+                    "role": "system",
+                    "content": "You are a terminal autocomplete binary. Give only the exact suffix of the shell command."
+                }, {"role": "user", "content": prompt}],
+                model="llama-3.1-8b-instant",
+                temperature=0.1,
+                max_tokens=20
+            )
+            suggestion = completion.choices[0].message.content.strip()
+            if suggestion.startswith("```"): suggestion = suggestion.split("\n")[1].replace("```", "")
+        
+        return jsonify({"suggestion": suggestion, "success": True})
+    except Exception as e:
+        print(f"Autocomplete Error: {e}", flush=True)
+        return jsonify({"suggestion": "", "success": False})
+
+@app.route("/diagnostics/train", methods=["POST"])
+@token_required
+def train_sentinel():
+    """
+    Phase 28: RAG Feedback Loop.
+    Indexes a specific event's diagnostic data into the Knowledge Warehouse.
+    """
+    data = request.json
+    event_id = data.get("event_id")
+    
+    with SessionLocal() as db_session:
+        event = db_session.query(Event).filter(Event.id == event_id).first()
+        if not event:
+            return jsonify({"error": "Event not found."}), 404
+            
+        # Phase 36: Physical Memory Generation
+        event.status = "archived" # Move to archive when 'learned'
+        
+        details = event.details or {}
+        root_cause = details.get("root_cause", "")
+        suggested_fix = details.get("suggested_fix", "")
+        
+        if root_cause and suggested_fix:
+            try:
+                import requests
+                # Use Ollama locally for extremely fast neural embedding generation 
+                payload = {"model": "mistral", "prompt": root_cause} # We use mistral locally
+                resp = requests.post("http://ollama:11434/api/embeddings", json=payload, timeout=5)
+                if resp.status_code == 200:
+                    embedding = resp.json().get("embedding")
+                    from shared.db import IncidentKnowledge
+                    existing_k = db_session.query(IncidentKnowledge).filter(IncidentKnowledge.root_cause == root_cause).first()
+                    if not existing_k and embedding:
+                        knowledge = IncidentKnowledge(
+                            root_cause=root_cause,
+                            suggested_fix=suggested_fix,
+                            source="human_verified",
+                            embedding=embedding
+                        )
+                        db_session.add(knowledge)
+            except Exception as e:
+                print(f"Failed to manually train RAG vector DB: {e}", flush=True)
+
+        db_session.commit()
+        return jsonify({"message": "Sentinel Training Completed. Incident permanently archived in pgvector Warehouse.", "success": True})
+
 def start_app():
     """
     Resilient startup: Retry DB init but don't block the API bind.
@@ -393,6 +605,9 @@ def start_app():
             print(f"Database sync attempt {retry_count} failed: {e}. Retrying...")
             time.sleep(5)
     
+    # Phase 25: Proactive Hygiene Alignment
+    align_system_health()
+
     # Start the Meta-Sentinel in background
     threading.Thread(target=watchdog_loop, daemon=True).start()
             

@@ -1,8 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+sentence-transformers
 confluent-kafka
 sqlalchemy
 psycopg2-binary
 pgvector
-sentence-transformers
 ollama
 groq
 python-dotenv

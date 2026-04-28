@@ -1,7 +1,7 @@
 import os
 import time
 import json
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, JSON, ForeignKey, Float
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, JSON, ForeignKey, Float, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, session
 from pgvector.sqlalchemy import Vector
@@ -55,6 +55,7 @@ class Metric(Base):
     container = Column(String(255), index=True)
     cpu_percent = Column(Float) # Precision percentage
     mem_usage_mb = Column(Float)
+    mem_limit_mb = Column(Float, default=0.0)
     disk_read_mb = Column(Float, default=0.0)
     disk_write_mb = Column(Float, default=0.0)
     timestamp = Column(DateTime, default=get_now_ist)
@@ -69,8 +70,21 @@ class IncidentKnowledge(Base):
     embedding = Column(Vector(384)) # Dimension for all-MiniLM-L6-v2
     root_cause = Column(Text)
     suggested_fix = Column(Text)
+    impact_assessment = Column(Text) # Phase 28: Impact capture
+    is_validated = Column(Boolean, default=False) # Phase 28: Human verification tracking
+    source_tier = Column(String(50)) # Tier 1, 2, or 3
     confidence = Column(Integer) # How often this fix worked
-    last_seen = Column(DateTime, default=datetime.utcnow)
+    last_seen = Column(DateTime, default=get_now_ist)
+
+class ProjectState(Base):
+    """
+    Phase 32: Persistent registry for Link/De-Link status.
+    """
+    __tablename__ = "project_states"
+    id = Column(Integer, primary_key=True, index=True)
+    project_name = Column(String(255), unique=True, index=True)
+    is_tracked = Column(Boolean, default=True)
+    last_updated = Column(DateTime, default=get_now_ist)
 
 def init_db():
     print("Connecting to database and initializing extensions...")
