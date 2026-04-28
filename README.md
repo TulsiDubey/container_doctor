@@ -203,5 +203,37 @@ docker logs -f log_ingestor
 ## 🏆 9. Why Container Doctor?
 Unlike generic log aggregators, **Container Doctor** is *actionable*. It doesn't just store data; it **analyzes** with Llama-3 reasoning, **learns** with RAG memory, and **heals** with autonomous decisions.
 
+
+## 💾 10. Application Pictures
+1. Login Page
+![alt text](image.png)
+
+2. Dashboard View
+![alt text](image-1.png)
+
+3. Project Explorer
+![alt text](image-2.png)
+
+4. Broken container Details 
+![alt text](image-3.png)
+
+5. Terminal Execution
+![alt text](image-4.png)
+
+6. Container wise live logs 
+![alt text](image-5.png)
+
+7. Recent Event History
+![alt text](image-6.png)
+
+8. Audit Data
+![alt text](image-7.png)
+
+9. DLQ for Undiagnosable Containers
+![alt text](image-8.png)
+
+10. Slack Alert
+![alt text](image-9.png)
+
 ---
 *© 2026 Container Doctor - Sentinel v14.0 - Sentience in Infrastructure.*
