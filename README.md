@@ -1,4 +1,4 @@
-# 🩺 Container Doctor: Enterprise AI-Sentinel & Observability Suite
+# 🩺 Container Doctor: Enterprise AI-Sentinel & Observability Suite (v35.0)
 
 **Container Doctor** is a production-grade, autonomous observability and self-healing platform designed for modern, high-density Docker environments. It transforms raw container telemetry into a high-reasoning diagnostic stream, leveraging **Groq-Powered Llama-3 Reasoning**, **Persistent Learning RAG Memory**, and **Kafka-native Event Sourcing** to detect, analyze, and resolve system failures with zero human intervention.
 
@@ -34,7 +34,7 @@ graph TD
         
         IP -- "1. Vector Search" --> DB_V[PGVector RAG Cache]
         IP -- "2. Reasoning" --> GROQ[Groq Cloud: Llama-3.1-8b]
-        IP -- "3. Fallback" --> OLLAMA[Local Ollama: Mistral]
+        IP -- "3. JIT Analysis" --> JIT[JIT Forensic Engine]
         
         IP -- "Remediation" --> RM[Remediation Manager]
         RM -- "Fix Action" --> DS
@@ -48,10 +48,12 @@ graph TD
 
     subgraph "Presentation Layer"
         API[Dashboard API Flask]
-        D[Web Dashboard UI - Chart.js]
+        D[Web Dashboard UI - Markdown Ready]
+        CH[AI Assistant Chat]
         API --> DB
         API --> DS
         D <--> API
+        CH -- "RAG Bypass" --> DB_V
     end
 ```
 
@@ -72,13 +74,14 @@ The `log_ingestor` is the eyes and ears of the system. It runs as a low-overhead
 The `incident_processor` is where raw data turns into intelligence. It operates on a **3-Tier Analysis Pipeline**:
 1.  **PGVector RAG Layer**: Converted logs are vectorized using `all-MiniLM-L6-v2`. If a similar log has been seen before (90%+ similarity), the system instantly applies the previous resolution.
 2.  **Groq Reasoning Tier (Llama-3.1)**: If the issue is new, the payload is sent to Groq. The system prompt instructs the AI to return *only* a valid JSON diagnostic with root causes and specific bash remediation commands.
-3.  **Local Fallback (Ollama)**: If the internet or cloud API is down, the system shifts logic to local Mistral models.
+3.  **JIT Forensic Engine**: For nodes missing historical data, Sentinel triggers a **Just-In-Time** log harvest to provide immediate reasoning for "silent" failures.
 
 ### 🛠️ C. Dashboard API (The Management Hub)
 A high-performance Flask REST layer that:
 - **State Hygiene**: On startup, it clears "Ghost" incidents if containers have manually returned to health.
-- **Executive Shell Proxy**: Safely routes Docker CLI commands from the UI to the host socket.
-- **Sentinel Autocomplete**: Uses Groq to suggest real-time commands in the terminal based on the container's active diagnostic context.
+- **Executive Shell Proxy**: Safely routes Docker CLI commands from the UI. It is **CWD-Aware**, tracking navigation (e.g., `cd /var/log`) across the session.
+- **AI Assistant Chat**: A RAG-backed DevOps chatbot that handles infrastructure queries with a 85% similarity bypass for instant responses.
+- **Markdown Engine**: Implements `marked.js` for structured, easy-to-read AI technical advice.
 
 ### 💾 D. Persistence Layer (The Time-Capsule)
 - **Postgres + PGVector**: Stores every incident permanently. It doesn't just log errors; it stores *knowledge*.
@@ -97,7 +100,7 @@ A high-performance Flask REST layer that:
 5.  **DIAGNOSIS**: Groq returns: `{"root_cause": "Memory Leak", "suggested_fix": "docker restart api"}`.
 6.  **HEALING**: The system marks the incident as `open` in the DB and triggers a Slack alert.
 7.  **VISUALIZATION**: The Dashboard shows a pulsing red alert with the "Audit Data" button.
-8.  **INTERACTION**: The SRE opens the "Executive Shell". The AI suggests `docker logs api --tail 50` via Autocomplete based on the crash context.
+8.  **INTERACTION**: The SRE opens the "Executive Shell". The UI tracks the **Working Directory** as the SRE navigates to logs to verify the fix.
 
 ---
 
@@ -110,7 +113,6 @@ We leverage **PostgreSQL 15** with the **PGVector** extension. The system moves 
 | :--- | :--- | :--- |
 | `id` | SERIAL | Primary Key. |
 | `container` | VARCHAR | Target node name (e.g., `api`). |
-| `project` | VARCHAR | Compose project mapping. |
 | `event_type` | VARCHAR | `diagnosis`, `remediation_attempt`, `ANOMALY_ALARM`, `SYSTEM_HEALED`. |
 | `status` | VARCHAR | `open`, `resolved`, `dlq`. |
 | `details` | JSONB | High-fidelity AI payload (source, severity, fix, confidence). |
@@ -124,28 +126,25 @@ We leverage **PostgreSQL 15** with the **PGVector** extension. The system moves 
 | `mem_limit_mb` | FLOAT | Node memory ceiling. |
 | `disk_read_mb` | FLOAT | Historical I/O throughput. |
 
-### C. RAG Memory (`incident_knowledge` table)
+### C. RAG Knowledge (`incident_knowledge` & `chat_knowledge`)
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `log_signature` | TEXT | Raw log trace (Source of truth). |
+| `query/signature`| TEXT | Raw log trace or user question. |
 | `embedding` | VECTOR(384) | 384-dimensional semantic representation. |
-| `root_cause` | TEXT | Validated reasoning from Groq. |
-| `suggested_fix` | TEXT | Confirmed bash remediation command. |
+| `answer/fix` | TEXT | Validated reasoning or remediation command. |
 
 ---
 
-## 🔬 4. AI Model Benchmarking (`AI_Model_Comparison.xlsx`)
+## 🔬 4. AI Model Benchmarking
 
-The repository includes a detailed comparison of models used across tiers:
-- **Groq Llama-3.1-8b**: Selected for low-latency (400ms) deep reasoning.
-- **Ollama Mistral**: High-reliability local fallback.
-- **all-MiniLM-L6-v2**: Optimized for fast vector embeddings on CPU.
+The system uses a **Tri-Tier Model Strategy**:
+- **Groq Llama-3.1-8b**: Ultra-low latency (400ms) deep reasoning for forensics.
+- **all-MiniLM-L6-v2**: Optimized for fast vector embeddings (384 dimensions) on CPU.
+- **Markdown Formatter**: Enforces structured, technical responses for the AI Assistant.
 
 ---
 
 ## 🛠️ 8. Operational Lifecycle (Step-by-Step Flow)
-
-This diagram details exactly how the system discovers containers and maintains state from login to real-time charting.
 
 ```mermaid
 sequenceDiagram
@@ -161,26 +160,18 @@ sequenceDiagram
     API->>API: shared/auth.py (JWT Issue)
     API-->>User: Bearer Token
 
-    Note over User, DB: 2. Discovery & Discovery Phase
+    Note over User, DB: 2. Discovery & Hydration
     Dashboard->>API: GET /projects (with JWT)
     API->>Docker: containers.list(all=True)
-    Docker-->>API: Namespaces, Labels, Statuses
-    API->>DB: Lookup ProjectState (Linked/De-Linked)
-    DB-->>API: is_tracked flags
-    
-    Note over User, DB: 3. Hydration Phase (Data Sync)
     API->>DB: Query LATEST Metric (CPU/RAM)
-    API->>DB: Query ACTIVE Incident (Diagnosis)
-    DB-->>API: 64-bit Precision Segments
     API-->>Dashboard: Unified JSON Tree
 
-    Note over User, DB: 4. Real-time Telemetry (Pulse)
-    Docker->>Kafka: log_ingestor (Event/Metric Stream)
-    Kafka->>DB: incident_processor (SQL Persist)
-    Dashboard->>API: GET /metrics/historical (Interval 5s)
-    API->>DB: Fetch last 50 Metric ticks
-    DB-->>API: Time-series Array
-    API-->>Dashboard: Render Chart.js
+    Note over User, DB: 3. Intelligent Interaction
+    User->>Dashboard: Ask Chat Bot ("How to fix OOM?")
+    Dashboard->>API: POST /api/chat
+    API->>DB: Cosine Similarity Search (Distance < 0.15)
+    DB-->>API: RAG Match Found
+    API-->>Dashboard: Instant Response (source: rag_cache)
 ```
 
 ---
@@ -192,48 +183,51 @@ sequenceDiagram
 docker compose up -d --build
 
 # Verify Connectivity
-docker ps # Ensure all services (Log-Ingestor, Kafka, Processor, DB, API) are healthy
+docker ps # Ensure all services are healthy
 
-# Monitoring Live Telemetry
-docker logs -f log_ingestor
+# Monitor Real-time Intelligence
+docker logs -f dashboard_api
 ```
 
 ---
 
 ## 🏆 9. Why Container Doctor?
-Unlike generic log aggregators, **Container Doctor** is *actionable*. It doesn't just store data; it **analyzes** with Llama-3 reasoning, **learns** with RAG memory, and **heals** with autonomous decisions.
 
-
-## 💾 10. Application Pictures
-1. Login Page
-![alt text](image.png)
-
-2. Dashboard View
-![alt text](image-1.png)
-
-3. Project Explorer
-![alt text](image-2.png)
-
-4. Broken container Details 
-![alt text](image-3.png)
-
-5. Terminal Execution
-![alt text](image-4.png)
-
-6. Container wise live logs 
-![alt text](image-5.png)
-
-7. Recent Event History
-![alt text](image-6.png)
-
-8. Audit Data
-![alt text](image-7.png)
-
-9. DLQ for Undiagnosable Containers
-![alt text](image-8.png)
-
-10. Slack Alert
-![alt text](image-9.png)
+Unlike generic log aggregators, **Container Doctor** is *actionable*. It doesn't just store data; it **analyzes** with Llama-3 reasoning, **learns** with RAG memory, and **heals** with autonomous decisions. It provides a **Context-Aware Shell** and **Dynamic Resource Patching** to close the gap between detection and resolution.
 
 ---
-*© 2026 Container Doctor - Sentinel v14.0 - Sentience in Infrastructure.*
+
+## 💾 10. Application Pictures
+
+1. **Login Page**  
+   ![Login Page](image.png)
+
+2. **Dashboard View**  
+   ![Dashboard View](image-1.png)
+
+3. **Project Explorer**  
+   ![Project Explorer](image-2.png)
+
+4. **Broken Container Details**  
+   ![Broken Container](image-3.png)
+
+5. **Executive Shell (CWD-Aware)**  
+   ![Terminal](image-4.png)
+
+6. **Searchable Live Logs**  
+   ![Live Logs](image-5.png)
+
+7. **Event History**  
+   ![Event History](image-6.png)
+
+8. **Audit Data**  
+   ![Audit Data](image-7.png)
+
+9. **DLQ (Dead Letter Queue)**  
+   ![DLQ](image-8.png)
+
+10. **Slack AI Alerts**  
+    ![Slack Alert](image-9.png)
+
+---
+*© 2026 Container Doctor - Sentinel v35.0 - Sentience in Infrastructure.*

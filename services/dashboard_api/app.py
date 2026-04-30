@@ -4,9 +4,10 @@ import json
 import time
 from flask import Flask, jsonify, request, session, redirect, send_file
 from flask_cors import CORS
-from shared.db import SessionLocal, Event, Metric, ProjectState, init_db, get_now_ist
+from shared.db import SessionLocal, Event, Metric, ProjectState, ChatMessage, ChatKnowledge, init_db, get_now_ist
 from shared.auth import generate_token, token_required
 from sqlalchemy import desc, func, text
+from sentence_transformers import SentenceTransformer
 import threading
 import requests
 from datetime import datetime, timezone, timedelta, timedelta
@@ -19,6 +20,7 @@ CORS(app)
 
 STATIC_DIR = os.path.dirname(os.path.abspath(__file__))
 docker_client = None
+embedder = SentenceTransformer('all-MiniLM-L6-v2')
 
 def get_docker_client():
     global docker_client
@@ -381,26 +383,73 @@ def get_diagnostics(container_name):
         ).order_by(desc(Event.timestamp)).first()
         
         if not event:
-            event = db.query(Event).filter(
-                Event.container == container_name,
-                Event.event_type.in_(["diagnosis", "ANOMALY_ALARM", "OUTAGE_DETECTED"])
-            ).order_by(desc(Event.timestamp)).first()
+            # Phase 40: JIT (Just-In-Time) Diagnosis
+            try:
+                client = get_docker_client()
+                container = client.containers.get(container_name)
+                # Fetch latest 100 lines for deep context analysis
+                logs = container.logs(tail=100).decode('utf-8')
+                
+                # Re-run reasoning if broken but silent
+                if container.status != "running" and logs:
+                    from groq import Groq
+                    api_key = os.getenv("GROQ_API_KEY", "")
+                    if api_key:
+                        groq_client = Groq(api_key=api_key)
+                        prompt = f"Perform deep forensic analysis on these Docker logs from '{container_name}'. The container is down. Identify root_cause, severity, and a one-line suggested_fix bash command. Log data: {logs}"
+                        chat = groq_client.chat.completions.create(
+                            messages=[
+                                {"role": "system", "content": "You are a Forensic Sentinel Agent. Return ONLY JSON with fields: root_cause, severity, suggested_fix, confidence_score."},
+                                {"role": "user", "content": prompt}
+                            ],
+                            model="llama-3.1-8b-instant",
+                            response_format={"type": "json_object"}
+                        )
+                        jit_diag = json.loads(chat.choices[0].message.content)
+                        
+                        # Persist JIT discovery to DB
+                        event = Event(
+                            container=container_name,
+                            event_type="diagnosis",
+                            status="open",
+                            details={
+                                "root_cause": jit_diag.get("root_cause", "Anomaly Detected"),
+                                "suggested_fix": jit_diag.get("suggested_fix", "docker restart " + container_name),
+                                "severity": jit_diag.get("severity", "high"),
+                                "source": "jit_forensics",
+                                "llm_confidence": jit_diag.get("confidence_score", 100)
+                            }
+                        )
+                        db.add(event)
+                        db.commit()
+                        db.refresh(event)
+                else:
+                    # If still nothing, move to DLQ
+                    dlq_event = Event(
+                        container=container_name,
+                        event_type="diagnosis",
+                        status="dlq",
+                        details={
+                            "root_cause": "Failed to extract diagnostic payload.",
+                            "suggested_fix": "Manual inspection required via terminal.",
+                            "severity": "high",
+                            "is_diagnosable": "false"
+                        }
+                    )
+                    db.add(dlq_event)
+                    db.commit()
+                    return jsonify({"error": "Node undiagnosable. Incident moved to DLQ for human review."}), 404
+            except Exception as e:
+                print(f"JIT Analysis Failed: {e}")
+                return jsonify({"error": f"Forensic engine failure: {str(e)}"}), 500
 
         if not event:
-            # Phase 21: Job Handling
-            if "ollama_pull" in container_name:
-                return jsonify({
-                    "root_cause": "Internal model provisioning completed successfully.",
-                    "suggested_fix": "No action required. job-ollama-pull finished securely.",
-                    "severity": "low",
-                    "source": "sentinel_job_engine",
-                    "llm_confidence": 100
-                })
-            return jsonify({"error": "No diagnostic payload available for this node state."}), 404
+            return jsonify({"error": "No diagnostic payload available."}), 404
         
         # Return the structured JSON details
         details = event.details or {}
         return jsonify({
+            "id": event.id,
             "root_cause": details.get("root_cause", "Undetermined"),
             "suggested_fix": details.get("suggested_fix", "Manual investigation required"),
             "severity": details.get("severity", "unknown"),
@@ -461,11 +510,12 @@ def terminal_exec():
     
     try:
         client = get_docker_client()
+        cwd = data.get("cwd", "/")
         
         # Generic Host Terminal (Phase 40)
         if container_name == "host":
             import subprocess
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30, cwd=cwd if os.path.exists(cwd) else None)
             return jsonify({
                 "output": result.stdout if result.stdout else result.stderr,
                 "exit_code": result.returncode,
@@ -496,7 +546,7 @@ def terminal_exec():
         if container.status != "running":
             return jsonify({"error": f"Node '{container_name}' is offline. Start it first.", "status": "failed"}), 200
 
-        result = container.exec_run(["/bin/sh", "-c", command], environment={"TERM": "xterm"})
+        result = container.exec_run(["/bin/sh", "-c", f"cd {cwd} && {command}"], environment={"TERM": "xterm"})
         return jsonify({
             "output": result.output.decode("utf-8") if result.output else "Command executed.",
             "exit_code": result.exit_code,
@@ -514,14 +564,24 @@ def update_resources(name):
     try:
         data = request.json
         mem_limit = data.get("memory") # e.g. "512m", "1g"
+        cpu_limit = float(data.get("cpu", 0.5)) # Default to 0.5 cores
         
         client = get_docker_client()
         container = client.containers.get(name)
         
-        # Update memory limits (Docker SDK uses bytes or string like '512m')
-        container.update(mem_limit=mem_limit, memswap_limit=mem_limit)
+        # CPU Period/Quota calculation
+        cpu_period = 100000
+        cpu_quota = int(cpu_limit * cpu_period)
         
-        return jsonify({"success": True, "message": f"Resource limits updated for {name} to {mem_limit}"})
+        # Update resources (Docker SDK)
+        container.update(
+            mem_limit=mem_limit, 
+            memswap_limit=mem_limit,
+            cpu_period=cpu_period,
+            cpu_quota=cpu_quota
+        )
+        
+        return jsonify({"success": True, "message": f"Resources updated for {name}: CPU={cpu_limit}, MEM={mem_limit}"})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -648,6 +708,96 @@ def start_app():
     threading.Thread(target=watchdog_loop, daemon=True).start()
             
     app.run(host="0.0.0.0", port=8080, threaded=True)
+
+@app.route("/api/chat", methods=["POST"])
+@token_required
+def chat_bot():
+    """
+    Phase 45: Senior DevOps SRE AI Assistant with RAG.
+    """
+    data = request.json
+    user_query = data.get("query")
+    if not user_query:
+        return jsonify({"error": "Query is required"}), 400
+
+    db = SessionLocal()
+    try:
+        # 1. RAG Cache Check
+        query_embedding = embedder.encode(user_query).tolist()
+        sim_match = db.query(
+            ChatKnowledge, 
+            ChatKnowledge.embedding.cosine_distance(query_embedding).label("distance")
+        ).order_by("distance").first()
+
+        # 85% similarity threshold (0.15 distance)
+        if sim_match and sim_match.distance <= 0.15:
+            answer = sim_match.ChatKnowledge.answer
+            source = "rag_cache"
+        else:
+            # 2. LLM Fallback (Groq)
+            from groq import Groq
+            api_key = os.getenv("GROQ_API_KEY", "")
+            if not api_key:
+                return jsonify({"error": "AI Engine offline (Missing API Key)"}), 503
+            
+            groq_client = Groq(api_key=api_key)
+            system_prompt = (
+                "You are a Senior DevOps SRE and Docker Expert. "
+                "Provide technical, accurate, and highly structured advice using Markdown. "
+                "Use bullet points for steps, bold text for key terms, and code blocks for commands. "
+                "Ensure your response is easy to read and logically organized."
+            )
+            
+            # Fetch recent history for context
+            history = db.query(ChatMessage).order_by(desc(ChatMessage.timestamp)).limit(5).all()
+            messages = [{"role": "system", "content": system_prompt}]
+            for h in reversed(history):
+                messages.append({"role": h.role, "content": h.content})
+            messages.append({"role": "user", "content": user_query})
+
+            chat_completion = groq_client.chat.completions.create(
+                messages=messages,
+                model="llama-3.1-8b-instant",
+                temperature=0.2
+            )
+            answer = chat_completion.choices[0].message.content
+            source = "groq_llama3"
+
+            # 3. Learning Phase: Auto-update RAG if it's a new quality answer
+            new_knowledge = ChatKnowledge(
+                query=user_query,
+                answer=answer,
+                embedding=query_embedding
+            )
+            db.add(new_knowledge)
+
+        # 4. Save to History
+        db.add(ChatMessage(role="user", content=user_query))
+        db.add(ChatMessage(role="assistant", content=answer))
+        db.commit()
+
+        return jsonify({
+            "answer": answer,
+            "source": source,
+            "timestamp": datetime.now(IST).isoformat()
+        })
+    except Exception as e:
+        print(f"Chat Engine Panic: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+@app.route("/api/chat/history", methods=["GET"])
+@token_required
+def chat_history():
+    db = SessionLocal()
+    try:
+        messages = db.query(ChatMessage).order_by(ChatMessage.timestamp).limit(50).all()
+        return jsonify({
+            "history": [{"role": m.role, "content": m.content, "timestamp": m.timestamp.isoformat()} for m in messages]
+        })
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     start_app()

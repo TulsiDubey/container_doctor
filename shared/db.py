@@ -86,6 +86,27 @@ class ProjectState(Base):
     is_tracked = Column(Boolean, default=True)
     last_updated = Column(DateTime, default=get_now_ist)
 
+class ChatMessage(Base):
+    """
+    Persistent AI Assistant chat history.
+    """
+    __tablename__ = "chat_history"
+    id = Column(Integer, primary_key=True, index=True)
+    role = Column(String(50)) # user, assistant
+    content = Column(Text)
+    timestamp = Column(DateTime, default=get_now_ist)
+
+class ChatKnowledge(Base):
+    """
+    RAG Cache for common user queries to reduce LLM tokens.
+    """
+    __tablename__ = "chat_knowledge"
+    id = Column(Integer, primary_key=True, index=True)
+    query = Column(Text)
+    answer = Column(Text)
+    embedding = Column(Vector(384))
+    timestamp = Column(DateTime, default=get_now_ist)
+
 def init_db():
     print("Connecting to database and initializing extensions...")
     retries = 30
