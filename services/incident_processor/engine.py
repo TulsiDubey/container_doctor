@@ -6,7 +6,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 IST = timezone(timedelta(hours=5, minutes=30))
 IST = timezone(timedelta(hours=5, minutes=30))
-from confluent_kafka import Consumer, Producer, KafkaException
+from confluent_kafka import Consumer, Producer, KafkaException, KafkaError
 from sentence_transformers import SentenceTransformer
 from shared.db import SessionLocal, Event, IncidentKnowledge, Metric, init_db
 from sqlalchemy import text
@@ -49,6 +49,28 @@ def get_kafka_producer():
     conf = {'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS}
     return Producer(conf)
 
+# --- Idempotency & Safety ---
+processed_events_cache = {} # {hash: timestamp}
+CACHE_MAX_AGE = 60 # Seconds to remember an event
+
+def is_duplicate(container, log_msg):
+    event_hash = hash(f"{container}:{log_msg[:100]}")
+    now = time.time()
+    if event_hash in processed_events_cache:
+        if now - processed_events_cache[event_hash] < CACHE_MAX_AGE:
+            return True
+    processed_events_cache[event_hash] = now
+    return False
+
+# Global producer for reuse
+_global_producer = None
+def get_kafka_producer():
+    global _global_producer
+    if _global_producer is None:
+        conf = {'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS}
+        _global_producer = Producer(conf)
+    return _global_producer
+
 def push_to_dlq(packet, reason):
     """
     Enterprise DLQ: Move failed events to human-review topic.
@@ -57,7 +79,7 @@ def push_to_dlq(packet, reason):
     packet["dlq_reason"] = reason
     packet["dlq_timestamp"] = datetime.now(IST).isoformat()
     producer.produce(KAFKA_TOPIC_DLQ, json.dumps(packet).encode('utf-8'))
-    producer.flush()
+    producer.poll(0)
     print(f"📦 Message pushed to DLQ: {reason}")
 
 def run_rule_engine(log_msg):
@@ -95,48 +117,59 @@ def rag_lookup(log_msg, db_session):
 
 def intelligent_reasoning(log_msg, container_name):
     """
-    Tier 1 (Ollama) -> Tier 2 (Groq) High-Performance Routing.
+    Tiered Reasoning: Tier 1 (Local Ollama) -> Tier 2 (Cloud Groq) Escalation.
     """
-    prompt = f"Analyze this Docker log from {container_name} and return JSON (root_cause, severity, suggested_fix, confidence_score). For suggested_fix, provide ONLY the exact one-line docker or bash command to run (no explanations or human text, e.g. 'docker restart {container_name}'). Log msg: {log_msg}"
-    
-    # TIER 1: OLLAMA (Mistral Local Fallback)
-    try:
-        # Use a timeout to prevent hanging on local model latency
-        response = ollama.generate(model='mistral', prompt=prompt)
-        diag = json.loads(response['response'])
-        conf_score = diag.get("confidence_score", 0)
-        if conf_score >= 80:
-            diag["source"] = "tier1_ollama"
-            diag["llm_confidence"] = conf_score
-            return diag
-    except Exception as e:
-        print(f"Ollama bypassed: {e}")
+    prompt = (
+        f"Analyze this Docker log from {container_name} and return ONLY valid JSON: "
+        '{'
+        '"root_cause": "...", '
+        '"severity": "low|medium|high", '
+        '"suggested_fix": "docker|bash command", '
+        '"alternative_fixes": ["cmd1", "cmd2"], '
+        '"reasoning": "...", '
+        '"impact": "...", '
+        '"confidence_score": 0-100'
+        '}. '
+        f"Log msg: {log_msg}"
+    )
 
-    # TIER 2: GROQ (Cloud Deep Reasoning)
-    prompt_sys = "You are a senior DevOps SRE. Return ONLY JSON with fields: root_cause, severity, suggested_fix, confidence_score."
-    for retry in range(2):
-        try:
-            chat_completion = groq_client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": prompt_sys},
-                    {"role": "user", "content": prompt}
-                ],
-                model="llama-3.1-8b-instant",
-                temperature=0.1,
-                response_format={"type": "json_object"}
-            )
-            diag = json.loads(chat_completion.choices[0].message.content)
-            diag["source"] = "tier2_groq_llama3"
-            confidence = diag.get("confidence_score", 100)
-            if confidence == 0 or confidence < 80: confidence = 100
-            diag["confidence_score"] = confidence
-            diag["llm_confidence"] = confidence
+    # --- Tier 1: Local Ollama (Efficiency/Privacy) ---
+    try:
+        response = ollama.chat(model='mistral', messages=[{'role': 'user', 'content': prompt}])
+        diag = json.loads(response['message']['content'])
+        
+        # If confidence is high enough (>= 85 for local triage), we accept local reasoning
+        if diag.get("confidence_score", 0) >= 85:
+            diag["source"] = "ollama_mistral"
             return diag
-        except Exception as e:
-            print(f"Tier 2 (Groq) Attempt {retry+1} failed: {e}")
-            time.sleep(1)
+        else:
+            print(f"Ollama confidence too low ({diag.get('confidence_score')}). Escalating to Groq...")
+    except Exception as e:
+        print(f"Ollama Fallback triggered: {e}")
+
+    # --- Tier 2: Cloud Groq (High Precision) ---
+    try:
+        chat_completion = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            response_format={"type": "json_object"},
+            temperature=0.1
+        )
+        diag = json.loads(chat_completion.choices[0].message.content)
+        diag["source"] = "groq_llama3"
+        
+        # Phase 47: Confidence Threshold Enforcement
+        # If cloud AI is also uncertain (< 60%), move to DLQ instead of taking action
+        if diag.get("confidence_score", 0) < 60:
+            diag["auto_restart_safe"] = False
+            print(f"⚠️ [LOW_CONFIDENCE] AI uncertain ({diag.get('confidence_score')}%). Remediation deferred.")
+        else:
+            diag["auto_restart_safe"] = True
             
-    return None
+        return diag
+    except Exception as e:
+        print(f"AI Critical Failure: {e}")
+        return None
 
 def process_log_packet(packet):
     """
@@ -144,6 +177,12 @@ def process_log_packet(packet):
     """
     log_msg = packet.get("log", "")
     container_name = packet.get("container", "unknown")
+    
+    # Phase 46: Idempotency Shield
+    if is_duplicate(container_name, log_msg):
+        print(f"♻️ [DEDUPE] Skipping duplicate event for {container_name}")
+        return
+
     with SessionLocal() as db:
         if packet.get("status") == "resolved":
             print(f"🌲 [RESOLVE] Marking all incidents for {container_name} as resolved.")
@@ -204,6 +243,14 @@ def process_log_packet(packet):
             # 5. Automated Remediation (Action Phase)
             auto_fix = os.getenv("AUTO_FIX", "true").lower() == "true"
             if auto_fix and diagnosis.get("auto_restart_safe"):
+                # 3. Execution (Recovery Manager)
+                # Phase 46: Critical Infrastructure Exemption
+                infra_containers = ["db", "kafka", "dashboard_api", "incident_processor", "log_ingestor", "ollama"]
+                if container_name in infra_containers:
+                    print(f"🛑 [SAFETY] Remediation skipped for Infrastructure Node: {container_name}")
+                    notifier.send_alert(container_name, diagnosis)
+                    return
+
                 success, rec_reason = recovery_manager.execute_remediation(container_name, diagnosis)
                 
             # Log the recovery attempt
@@ -226,19 +273,70 @@ def process_log_packet(packet):
 metric_buffer = []
 last_flush = datetime.now(IST)
 
+# --- Phase 48: Predictive Failure Logic ---
+trend_window = {} # container_name -> [last_5_memory_readings]
+
+def analyze_trends(container_name, mem_mb, project):
+    if container_name not in trend_window:
+        trend_window[container_name] = []
+    
+    window = trend_window[container_name]
+    window.append(mem_mb)
+    if len(window) > 5:
+        window.pop(0)
+    
+    # Simple linear trend detection: if every sample is > previous
+    if len(window) == 5:
+        is_rising = all(window[i] > window[i-1] for i in range(1, 5))
+        growth = window[-1] - window[0]
+        
+        # If rising consistently and growth > 10MB in ~20s, trigger alarm
+        if is_rising and growth > 10:
+            print(f"📈 [PREDICTIVE] Anomaly detected for {container_name}: Consistent memory climb (+{round(growth, 2)}MB).")
+            with SessionLocal() as db:
+                # Deduplicate: only one predictive alarm per hour per container
+                existing = db.query(Event).filter(
+                    Event.container == container_name,
+                    Event.event_type == "ANOMALY_ALARM",
+                    Event.timestamp > datetime.now(IST) - timedelta(hours=1)
+                ).first()
+                
+                if not existing:
+                    db.add(Event(
+                        container=container_name,
+                        project=project,
+                        event_type="ANOMALY_ALARM",
+                        details={
+                            "root_cause": "Predictive Memory Leak / Resource Exhaustion",
+                            "severity": "medium",
+                            "suggested_fix": "Investigate memory utilization trends; possible memory leak detected.",
+                            "trend": window,
+                            "confidence_score": 75
+                        },
+                        status="open"
+                    ))
+                    db.commit()
+
 def process_metric_packet(packet):
     """
-    Buffer metrics for batch insert.
+    Buffer metrics and analyze trends.
     """
     global last_flush
+    
+    container_name = packet.get("container", "unknown")
+    mem_usage = float(packet.get("mem_usage_mb", 0.0))
+    project = packet.get("project", "standalone")
+    
+    # Analyze for Predictive Failure
+    analyze_trends(container_name, mem_usage, project)
     metric_buffer.append(Metric(
-        container=packet.get("container", "unknown"),
+        container=container_name,
         cpu_percent=float(packet.get("cpu_percent", 0.0)),
-        mem_usage_mb=float(packet.get("mem_usage_mb", 0.0)),
+        mem_usage_mb=mem_usage,
         mem_limit_mb=float(packet.get("mem_limit_mb", 0.0)),
         disk_read_mb=float(packet.get("disk_read_mb", 0.0)),
         disk_write_mb=float(packet.get("disk_write_mb", 0.0)),
-        timestamp=datetime.fromisoformat(packet.get("timestamp", datetime.utcnow().isoformat()))
+        timestamp=datetime.fromisoformat(packet.get("timestamp", datetime.now(IST).isoformat()))
     ))
     
     # Flush every 10 seconds or every 50 metrics to prevent DB pressure
@@ -278,7 +376,7 @@ def main():
                         continue
                     
                     if msg.error():
-                        if msg.error().code() == KafkaException._PARTITION_EOF: continue
+                        if msg.error().code() == KafkaError._PARTITION_EOF: continue
                         else: raise KafkaException(msg.error())
                     
                     topic = msg.topic()

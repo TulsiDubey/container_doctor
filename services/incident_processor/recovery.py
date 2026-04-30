@@ -37,6 +37,15 @@ class RecoveryManager:
         """
         Execute safe remediation with Canary and Circuit Breaker logic.
         """
+        # Phase 46: Controlled Self-Healing (Safety First)
+        suggested_fix = diagnosis.get("suggested_fix", "").lower()
+        safe_actions = ["restart", "docker restart", "docker-compose restart", "docker start"]
+        is_safe = any(action in suggested_fix for action in safe_actions)
+        
+        if not is_safe:
+            print(f"⚠️ [SAFETY] Remediation blocked for {container_name}: Action '{suggested_fix}' is not in the safe whitelist.")
+            return False, "Remediation blocked: Action not in safe whitelist (Manual SRE intervention required)."
+
         if self.circuit_breaker.is_open(container_name):
             print(f"Recovery Halted: Circuit Breaker OPEN for {container_name}")
             return False, "Circuit breaker triggered due to flapping."

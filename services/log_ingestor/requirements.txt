@@ -1,3 +1,6 @@
 docker
 confluent-kafka
 python-dotenv
+sqlalchemy
+psycopg2-binary
+pgvector

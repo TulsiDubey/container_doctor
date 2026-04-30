@@ -654,7 +654,7 @@
 
     <aside>
         <div class="branding">
-            <h1>🐳 Docker Agent <span class="version-badge">v34.0</span></h1>
+            <h1>🐳 Docker Agent <span class="version-badge">v35.0</span></h1>
             <div style="display:flex; align-items:center; gap:8px; margin-top:4px;">
                 <div id="sentinel-pulse" style="width:8px; height:8px; border-radius:50%; background:#ef4444; box-shadow:0 0 5px #ef4444;"></div>
                 <div style="font-size: 11px; color: var(--text-secondary);">Sentience Path: REAL-TIME PULSE</div>
@@ -695,6 +695,25 @@
                     <div class="stat-card" onclick="switchTab('explorer')">
                         <div class="stat-val" id="stat-broken" style="color:var(--high-severity)">0</div>
                         <div class="stat-label">Broken Containers</div>
+                    </div>
+                </div>
+
+                <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr); margin-top: 15px;">
+                    <div class="stat-card" style="background: rgba(16, 185, 129, 0.05); border-color: rgba(16, 185, 129, 0.2);">
+                        <div class="stat-val" id="sys-status" style="color:var(--low-severity); font-size: 1.2rem;">HEALTHY</div>
+                        <div class="stat-label">System State</div>
+                    </div>
+                    <div class="stat-card" style="background: rgba(192, 132, 252, 0.05); border-color: rgba(192, 132, 252, 0.2);">
+                        <div class="stat-val" id="sys-rag" style="color:#c084fc; font-size: 1.2rem;">0%</div>
+                        <div class="stat-label">RAG Hit Rate</div>
+                    </div>
+                    <div class="stat-card" style="background: rgba(96, 165, 250, 0.05); border-color: rgba(96, 165, 250, 0.2);">
+                        <div class="stat-val" id="sys-confidence" style="color:#60a5fa; font-size: 1.2rem;">0%</div>
+                        <div class="stat-label">Avg AI Confidence</div>
+                    </div>
+                    <div class="stat-card" style="background: rgba(245, 158, 11, 0.05); border-color: rgba(245, 158, 11, 0.2);">
+                        <div class="stat-val" id="sys-db" style="color:var(--medium-severity); font-size: 1.2rem;">ONLINE</div>
+                        <div class="stat-label">PGVector Hub</div>
                     </div>
                 </div>
 
@@ -1061,6 +1080,29 @@
             // 4. Update Real-time Chart.js Arrays
             fetchMetricsGraph();
 
+            // 5. Phase 47: System Observability Tier
+            apiCall('/api/system/health', (data) => {
+                const isHealthy = data && data.status === 'healthy';
+                const statusEl = document.getElementById('sys-status');
+                const pulseEl = document.getElementById('sentinel-pulse');
+                
+                if (isHealthy) {
+                    statusEl.innerText = 'HEALTHY';
+                    statusEl.style.color = 'var(--low-severity)';
+                    pulseEl.style.background = '#22c55e';
+                    pulseEl.style.boxShadow = '0 0 10px #22c55e';
+                } else {
+                    statusEl.innerText = 'DEGRADED';
+                    statusEl.style.color = 'var(--high-severity)';
+                    pulseEl.style.background = '#ef4444';
+                    pulseEl.style.boxShadow = '0 0 10px #ef4444';
+                }
+                
+                document.getElementById('sys-rag').innerText = data.rag_hit_rate || '0%';
+                document.getElementById('sys-confidence').innerText = (data.ai_confidence_avg || 0) + '%';
+                document.getElementById('sys-db').innerText = (data.db || 'OFFLINE').toUpperCase();
+            });
+
             } catch (e) {
                 console.error("Global Refresh Loop Panic:", e);
             }
@@ -1118,11 +1160,19 @@
                     return;
                 }
                 document.getElementById('diag-content').innerHTML = `
-                    <div class="field-label">AI Diagnostic Source:</div> <div class="field-value">${data.source} (${data.llm_confidence}% Match)</div><br>
-                    <div class="field-label">Detected Root Cause:</div> <div class="field-value">${data.root_cause}</div><br>
-                    <div class="field-label">Proposed Remediation:</div> <div class="field-value" style="color:#f1f5f9">${data.suggested_fix}</div><br>
-                    <div class="field-label">Impact Assessment:</div> <div class="field-value" style="color:#fcd34d">${data.severity.toUpperCase()} IMPACT</div>
-                    <div style="margin-top:20px; display:flex; gap:10px;">
+                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px;">
+                        <div>
+                            <div class="field-label">AI Diagnostic Source:</div> <div class="field-value">${data.source} (${data.llm_confidence}% Match)</div><br>
+                            <div class="field-label">Detected Root Cause:</div> <div class="field-value" style="color:#f1f5f9">${data.root_cause}</div><br>
+                            <div class="field-label">Proposed Remediation:</div> <div class="field-value" style="color:#10b981; font-family:monospace; background:rgba(0,0,0,0.3); padding:5px; border-radius:4px;">${data.suggested_fix}</div><br>
+                            <div class="field-label">Alternative Fixes:</div> <div class="field-value">${(data.alternative_fixes || []).map(f => `<code style="display:block;margin-bottom:5px">${f}</code>`).join('')}</div>
+                        </div>
+                        <div style="border-left:1px solid var(--glass-border); padding-left:20px;">
+                            <div class="field-label">Reasoning:</div> <div class="field-value" style="font-style:italic; font-size:13px">${data.reasoning || "No reasoning provided."}</div><br>
+                            <div class="field-label">System Impact:</div> <div class="field-value" style="color:#fcd34d">${data.impact || data.severity.toUpperCase() + " IMPACT"}</div>
+                        </div>
+                    </div>
+                    <div style="margin-top:20px; display:flex; gap:10px; border-top:1px solid var(--glass-border); padding-top:20px;">
                         <button class="btn-view" style="background:var(--accent-blue)" onclick="openTerminal('${name}', '${data.suggested_fix.replace(/'/g, "\\'").replace(/"/g, '\\"')}')">Launch Executive Shell</button>
                         <button class="btn-view" style="background:var(--low-severity)" onclick="trainSentinel('${data.id || ''}')">✅ Confirm & Train RAG</button>
                     </div>

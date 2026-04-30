@@ -6,7 +6,7 @@ from flask import Flask, jsonify, request, session, redirect, send_file
 from flask_cors import CORS
 from shared.db import SessionLocal, Event, Metric, ProjectState, ChatMessage, ChatKnowledge, init_db, get_now_ist
 from shared.auth import generate_token, token_required
-from sqlalchemy import desc, func, text
+from sqlalchemy import desc, func, text, cast, Integer
 from sentence_transformers import SentenceTransformer
 import threading
 import requests
@@ -70,6 +70,37 @@ def align_system_health():
             except: pass
         db.commit()
     print("✅ [SENTINEL] Hygiene Alignment Complete.")
+
+@app.route("/api/system/health", methods=["GET"])
+@token_required
+def system_health():
+    """
+    Phase 47: Self-Monitoring Observability.
+    """
+    db = SessionLocal()
+    try:
+        # 1. Database Health
+        db.execute(text("SELECT 1"))
+        
+        # 2. AI Metrics (Approximate from history)
+        avg_confidence = db.query(func.avg(cast(Event.details['llm_confidence'].astext, Integer))).filter(Event.event_type == 'diagnosis').scalar() or 0
+        
+        # 3. RAG Hit Rate (Approximate)
+        total_diag = db.query(Event).filter(Event.event_type == 'diagnosis').count()
+        rag_hits = db.query(Event).filter(Event.event_type == 'diagnosis', Event.details['source'].astext == 'rag_cache').count()
+        hit_rate = (rag_hits / total_diag * 100) if total_diag > 0 else 0
+        
+        return jsonify({
+            "status": "healthy",
+            "db": "connected",
+            "ai_confidence_avg": round(float(avg_confidence), 2),
+            "rag_hit_rate": f"{round(hit_rate, 1)}%",
+            "timestamp": datetime.now(IST).isoformat()
+        })
+    except Exception as e:
+        return jsonify({"status": "degraded", "error": str(e)}), 500
+    finally:
+        db.close()
 
 @app.after_request
 def add_header(response):
@@ -540,6 +571,12 @@ def terminal_exec():
                     return jsonify({"error": str(ex)}), 404
             else:
                 return jsonify({"error": "Invalid docker command format."}), 400
+
+        # Phase 46: Security Shield (Blacklist)
+        blacklist = ["rm -rf", "chmod 777", ":(){ :|:& };:", "dd if=", "> /dev/sda", "shutdown", "reboot"]
+        for forbidden in blacklist:
+            if forbidden in command.lower():
+                return jsonify({"error": f"Security Violation: Command '{forbidden}' is restricted.", "status": "blocked"}), 403
 
         # Sub-container contextual shell
         container = client.containers.get(container_name)

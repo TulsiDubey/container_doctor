@@ -8,6 +8,8 @@ WORKDIR /app
 COPY services/log_ingestor/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY services/log_ingestor/ ./services/log_ingestor/
+ENV PYTHONPATH=/app
+COPY shared/ /app/shared/
+COPY services/log_ingestor/ /app/services/log_ingestor/
 
 CMD ["python", "services/log_ingestor/main.py"]
