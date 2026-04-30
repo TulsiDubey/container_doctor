@@ -532,9 +532,9 @@
         <div class="nav-item" onclick="switchTab('logs', this)">🖥️ Live Logs</div>
         <div class="nav-item" onclick="switchTab('history', this)">📜 Event History</div>
         <div class="nav-item" style="color:var(--medium-severity)" onclick="switchTab('dlq', this)">⚠️ Dead Letter Queue</div>
+        <div class="nav-item" onclick="openGlobalTerminal()" style="color:#60a5fa">💻 Global Terminal</div>
         <div style="flex:1"></div>
-        <div class="nav-item" style="color:var(--high-severity)" onclick="window.location.href='/logout'">🚪 Secure
-            Logout</div>
+        <div class="nav-item" style="color:var(--high-severity)" onclick="window.location.href='/logout'">🚪 Secure Logout</div>
     </aside>
 
     <main>
@@ -793,6 +793,12 @@
                                     <td style="color:#c084fc; font-weight:600">${c.ram}</td>
                                     <td style="color:#fcd34d; font-size:12px">${c.mem_percent}</td>
                                     <td>${diagBtn}</td>
+                                    <td>
+                                        <div style="display:flex; gap:5px;">
+                                            <button class="btn-view" style="padding:4px 8px; font-size:10px; background:var(--accent-blue)" onclick="openTerminal('${c.name}')">🐚 Shell</button>
+                                            <button class="btn-view" style="padding:4px 8px; font-size:10px; background:var(--sidebar-bg)" onclick="openResourceModal('${c.name}')">⚙️ Config</button>
+                                        </div>
+                                    </td>
                                 </tr>
                             `;
                             logOpts += `<option value="${c.name}">${c.name}</option>`;
@@ -802,7 +808,7 @@
                             <div class="project-group">
                                 <div class="project-header">Compose Project: ${p.name}</div>
                                 <div class="table-responsive"><table>
-                                    <thead><tr><th>Container</th><th>State</th><th>CPU</th><th>RAM</th><th>Disk IO</th><th>In-Flight Insight</th></tr></thead>
+                                    <thead><tr><th>Container</th><th>State</th><th>CPU</th><th>RAM</th><th>Disk IO</th><th>In-Flight Insight</th><th>Operations</th></tr></thead>
                                     <tbody>${rows}</tbody>
                                 </table></div>
                             </div>
@@ -1167,6 +1173,20 @@
                 debouncedAutocomplete(); // Prime the pump for the next word
             }
         }
+        function openGlobalTerminal() {
+            openTerminal('host', 'docker ps');
+        }
+
+        async function openResourceModal(containerName) {
+            const mem = prompt("Enter new memory limit for " + containerName + " (e.g., 512m, 1g):", "512m");
+            if (!mem) return;
+            
+            apiCall(`/api/container/${containerName}/resources`, (data) => {
+                alert(data.message || data.error);
+                updateGlobal();
+            }, 'POST', { memory: mem });
+        }
     </script>
 </body>
+
 </html>

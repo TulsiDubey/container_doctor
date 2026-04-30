@@ -85,7 +85,12 @@ services:
         curl -X POST http://ollama:11434/api/pull -d '{\"name\": \"mistral\"}';
         sleep 5;
       done;
-      echo 'Mistral sentinel model verified.'"
+      until curl -s http://ollama:11434/api/tags | grep -q 'all-minilm'; do
+        echo 'Pulling all-minilm model for RAG embeddings...';
+        curl -X POST http://ollama:11434/api/pull -d '{\"name\": \"all-minilm\"}';
+        sleep 5;
+      done;
+      echo 'Mistral and all-minilm sentinel models verified.'"
 
   # --- MONITORING SERVICES ---
 
@@ -149,6 +154,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://tulsi1:Tulsi%402211@db:5432/mydb
       - GROQ_API_KEY=${GROQ_API_KEY}
+      - ADMIN_USER=admin
+      - ADMIN_PASS=admin
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

@@ -106,7 +106,10 @@ def login_api():
     un = data.get("username")
     pw = data.get("password")
     
-    if un and pw:
+    admin_user = os.getenv("ADMIN_USER", "admin")
+    admin_pass = os.getenv("ADMIN_PASS", "admin")
+    
+    if un == admin_user and pw == admin_pass:
         token = generate_token(un)
         return jsonify({"token": token, "success": True})
     
@@ -443,52 +446,84 @@ def get_logs(container_name):
 def terminal_exec():
     """
     Phase 28: Sentinel Executive Shell.
-    Provides direct command execution on targeted containers.
+    Provides direct command execution on targeted containers or host.
     """
     data = request.json
     container_name = data.get("container")
     command = data.get("command")
     
-    # Safety Filter (Phase 32: Commander Mode - Loosened to allow any command with log)
-    # Block ONLY absolute system-destroyers
+    # Safety Filter
     blocked = ["rm -rf /", "mkfs", "dd if=/dev/zero"]
     if any(b in command for b in blocked):
         return jsonify({"error": "Sentinel blocked absolute destructive command."}), 403
 
-    print(f"🛡️ [COMMANDER_MODE] Executing manual command on {container_name}: {command}")
+    print(f"🛡️ [COMMANDER_MODE] Executing command on {container_name}: {command}")
     
     try:
         client = get_docker_client()
         
+        # Generic Host Terminal (Phase 40)
+        if container_name == "host":
+            import subprocess
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+            return jsonify({
+                "output": result.stdout if result.stdout else result.stderr,
+                "exit_code": result.returncode,
+                "status": "success"
+            })
+
         # Intercept Host Context Docker Commands
         if command.startswith("docker "):
             parts = command.split()
             if len(parts) >= 3:
                 action = parts[1]
                 target = parts[2]
-                target_container = client.containers.get(target)
-                if action == "start": target_container.start()
-                elif action == "stop": target_container.stop()
-                elif action == "restart": target_container.restart()
-                elif action == "kill": target_container.kill()
-                else: return jsonify({"error": f"Unsupported sentinel docker action: {action}", "status": "failed"}), 400
-                return jsonify({"output": f"[HOST] Successfully executed docker {action} on {target}", "exit_code": 0, "status": "success"})
+                try:
+                    target_container = client.containers.get(target)
+                    if action == "start": target_container.start()
+                    elif action == "stop": target_container.stop()
+                    elif action == "restart": target_container.restart()
+                    elif action == "kill": target_container.kill()
+                    else: return jsonify({"error": f"Unsupported action: {action}"}), 400
+                    return jsonify({"output": f"[HOST] Successfully executed docker {action} on {target}", "exit_code": 0})
+                except Exception as ex:
+                    return jsonify({"error": str(ex)}), 404
             else:
-                return jsonify({"error": "Invalid docker command format.", "status": "failed"}), 400
+                return jsonify({"error": "Invalid docker command format."}), 400
 
         # Sub-container contextual shell
         container = client.containers.get(container_name)
         if container.status != "running":
-            return jsonify({"error": f"Node '{container_name}' is currently offline. Please run 'docker start {container_name}' to boot it before issuing internal commands.", "status": "failed"}), 200
+            return jsonify({"error": f"Node '{container_name}' is offline. Start it first.", "status": "failed"}), 200
 
         result = container.exec_run(["/bin/sh", "-c", command], environment={"TERM": "xterm"})
         return jsonify({
-            "output": result.output.decode("utf-8") if result.output else "Command executed (No output).",
+            "output": result.output.decode("utf-8") if result.output else "Command executed.",
             "exit_code": result.exit_code,
             "status": "success"
         })
     except Exception as e:
         return jsonify({"error": str(e), "status": "failed"}), 500
+
+@app.route("/api/container/<name>/resources", methods=["POST"])
+@token_required
+def update_resources(name):
+    """
+    Phase 40: Dynamic Resource Allocation.
+    """
+    try:
+        data = request.json
+        mem_limit = data.get("memory") # e.g. "512m", "1g"
+        
+        client = get_docker_client()
+        container = client.containers.get(name)
+        
+        # Update memory limits (Docker SDK uses bytes or string like '512m')
+        container.update(mem_limit=mem_limit, memswap_limit=mem_limit)
+        
+        return jsonify({"success": True, "message": f"Resource limits updated for {name} to {mem_limit}"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/terminal/autocomplete", methods=["POST"])
 @token_required
@@ -569,7 +604,8 @@ def train_sentinel():
             try:
                 import requests
                 # Use Ollama locally for extremely fast neural embedding generation 
-                payload = {"model": "mistral", "prompt": root_cause} # We use mistral locally
+                # all-minilm matches the 384 dimensions of our vector DB
+                payload = {"model": "all-minilm", "prompt": root_cause} 
                 resp = requests.post("http://ollama:11434/api/embeddings", json=payload, timeout=5)
                 if resp.status_code == 200:
                     embedding = resp.json().get("embedding")

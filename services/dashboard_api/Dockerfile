@@ -4,6 +4,8 @@ WORKDIR /app
 
 # Removed apt-get block to bypass unstable network dependencies. 
 # Using binary wheels instead.
+# Re-adding apt-get for docker-cli installation
+RUN apt-get update && apt-get install -y docker.io && rm -rf /var/lib/apt/lists/*
 
 # Reuse shared requirements or create dashboard specific
 COPY shared/requirements.txt requirements.txt
